@@ -583,6 +583,7 @@ async def _upload_ciphertext(
     *,
     ciphertext: bytes,
     upload_url: str,
+    proxy_url: str = "",
 ) -> str:
     """Upload encrypted media to the CDN.
 
@@ -593,7 +594,13 @@ async def _upload_ciphertext(
     # "Timeout context manager should be used inside a task" errors when
     # invoked via asyncio.run_coroutine_threadsafe() from cron jobs.
     async def _do_upload() -> str:
-        async with session.post(upload_url, data=ciphertext, headers={"Content-Type": "application/octet-stream"}) as response:
+        request_kwargs: Dict[str, Any] = {
+            "data": ciphertext,
+            "headers": {"Content-Type": "application/octet-stream"},
+        }
+        if proxy_url:
+            request_kwargs["proxy"] = proxy_url
+        async with session.post(upload_url, **request_kwargs) as response:
             if response.status == 200:
                 encrypted_param = response.headers.get("x-encrypted-param")
                 if encrypted_param:
@@ -1199,6 +1206,10 @@ class WeixinAdapter(BasePlatformAdapter):
         self._cdn_base_url = str(
             extra.get("cdn_base_url") or _wx_secret("WEIXIN_CDN_BASE_URL", WEIXIN_CDN_BASE_URL)
         ).strip().rstrip("/")
+        self._cdn_upload_proxy = str(
+            extra.get("cdn_upload_proxy")
+            or _wx_secret("WEIXIN_CDN_UPLOAD_PROXY", "")
+        ).strip()
         self._send_chunk_delay_seconds = float(
             extra.get("send_chunk_delay_seconds") or os.getenv("WEIXIN_SEND_CHUNK_DELAY_SECONDS", "1.5")
         )
@@ -2217,6 +2228,7 @@ class WeixinAdapter(BasePlatformAdapter):
             self._send_session,
             ciphertext=ciphertext,
             upload_url=upload_url,
+            proxy_url=self._cdn_upload_proxy,
         )
         context_token = self._token_store.get(self._account_id, chat_id)
         # The iLink API expects aes_key as base64(hex_string), not base64(raw_bytes).
