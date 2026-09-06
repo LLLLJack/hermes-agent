@@ -5561,6 +5561,10 @@ async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
         )
 
     file_path = result.get("file_path")
+    if not file_path:
+        file_paths = result.get("file_paths")
+        if isinstance(file_paths, list) and file_paths:
+            file_path = file_paths[0]
     if not file_path or not os.path.isfile(file_path):
         raise HTTPException(status_code=500, detail="Audio file missing")
 

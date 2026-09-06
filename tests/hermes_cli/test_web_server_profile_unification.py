@@ -807,6 +807,30 @@ class TestProfileScopedAudio:
         assert resp.json()["transcript"] == "hi"
         assert seen["home"] == str(isolated_profiles["worker_beta"])
 
+    def test_speak_accepts_modern_file_paths_result(
+        self, client, isolated_profiles, monkeypatch, tmp_path
+    ):
+        import json
+
+        import tools.tts_tool as tts_tool
+
+        audio_path = tmp_path / "speech.mp3"
+        audio_path.write_bytes(b"ID3fake")
+        monkeypatch.setattr(
+            tts_tool,
+            "text_to_speech_tool",
+            lambda _text: json.dumps({
+                "success": True,
+                "file_paths": [str(audio_path)],
+                "provider": "edge",
+            }),
+        )
+
+        resp = client.post("/api/audio/speak", json={"text": "hello"})
+        assert resp.status_code == 200
+        assert resp.json()["provider"] == "edge"
+        assert resp.json()["data_url"].startswith("data:audio/mpeg;base64,")
+
     def test_audio_endpoints_unknown_profile_404(self, client, isolated_profiles):
         resp = client.get("/api/audio/elevenlabs/voices?profile=ghost")
         assert resp.status_code == 404
