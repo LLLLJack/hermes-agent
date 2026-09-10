@@ -146,6 +146,63 @@ class TestChatCompletionsBasic:
         msgs = [{"role": "user", "content": "hi"}]
         assert transport.convert_messages(msgs) is msgs
 
+    def test_convert_messages_adds_missing_gemini_tool_signature_sentinel(self, transport):
+        """Gemini fallback can replay a tool call created by a non-Gemini model.
+
+        That history has no Google ``thought_signature``.  Add the same
+        compatibility sentinel used by the native Gemini adapter, but only to
+        the outgoing copy so durable provider-neutral history stays untouched.
+        """
+        tool_call = {
+            "id": "call_foreign",
+            "type": "function",
+            "function": {"name": "terminal", "arguments": "{}"},
+        }
+        msgs = [
+            {"role": "assistant", "content": None, "tool_calls": [tool_call]},
+            {"role": "tool", "tool_call_id": "call_foreign", "content": "done"},
+        ]
+
+        result = transport.convert_messages(msgs, model="google/gemini-3.8-flash")
+
+        assert result is not msgs
+        assert result[0] is not msgs[0]
+        assert result[0]["tool_calls"][0]["extra_content"] == {
+            "google": {"thought_signature": "skip_thought_signature_validator"}
+        }
+        assert "extra_content" not in tool_call
+
+    def test_convert_messages_preserves_unrelated_extra_content_when_adding_gemini_sentinel(self, transport):
+        tool_call = {
+            "id": "call_foreign",
+            "type": "function",
+            "function": {"name": "terminal", "arguments": "{}"},
+            "extra_content": {"vendor": {"opaque": "keep-me"}},
+        }
+        msgs = [{"role": "assistant", "content": None, "tool_calls": [tool_call]}]
+
+        result = transport.convert_messages(msgs, model="google/gemini-3.8-flash")
+
+        extra = result[0]["tool_calls"][0]["extra_content"]
+        assert extra["vendor"] == {"opaque": "keep-me"}
+        assert extra["google"] == {
+            "thought_signature": "skip_thought_signature_validator"
+        }
+        assert tool_call["extra_content"] == {"vendor": {"opaque": "keep-me"}}
+
+    def test_convert_messages_does_not_add_gemini_sentinel_to_non_gemini_target(self, transport):
+        tool_call = {
+            "id": "call_foreign",
+            "type": "function",
+            "function": {"name": "terminal", "arguments": "{}"},
+        }
+        msgs = [{"role": "assistant", "content": None, "tool_calls": [tool_call]}]
+
+        result = transport.convert_messages(msgs, model="gpt-5.6-sol")
+
+        assert result is msgs
+        assert "extra_content" not in result[0]["tool_calls"][0]
+
     def test_convert_messages_strips_internal_scaffolding_markers(self, transport):
         """Hermes-internal ``_``-prefixed markers must never reach the wire.
 

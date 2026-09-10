@@ -250,6 +250,21 @@ def _model_consumes_thought_signature(model: Any) -> bool:
     return "gemini" in m or "gemma" in m
 
 
+_GEMINI_TOOL_CALL_SIGNATURE_SENTINEL = "skip_thought_signature_validator"
+
+
+def _tool_call_has_gemini_signature(tool_call: dict[str, Any]) -> bool:
+    """Whether a tool call already carries a non-empty Gemini thought signature."""
+    extra = tool_call.get("extra_content")
+    if not isinstance(extra, dict):
+        return False
+    google = extra.get("google") or extra.get("thought_signature")
+    if isinstance(google, dict):
+        sig = google.get("thought_signature") or google.get("thoughtSignature")
+        return isinstance(sig, str) and bool(sig)
+    return isinstance(google, str) and bool(google)
+
+
 class ChatCompletionsTransport(ProviderTransport):
     """Transport for api_mode='chat_completions'.
 
@@ -338,10 +353,18 @@ class ChatCompletionsTransport(ProviderTransport):
                     needs_sanitize = True
                     break
                 for tc in tool_calls:
+                    missing_gemini_signature = (
+                        not strip_extra_content
+                        and msg.get("role") == "assistant"
+                        and isinstance(tc, dict)
+                        and isinstance(tc.get("function"), dict)
+                        and not _tool_call_has_gemini_signature(tc)
+                    )
                     if isinstance(tc, dict) and (
                         "call_id" in tc
                         or "response_item_id" in tc
                         or (strip_extra_content and "extra_content" in tc)
+                        or missing_gemini_signature
                     ):
                         needs_sanitize = True
                         break
@@ -418,10 +441,17 @@ class ChatCompletionsTransport(ProviderTransport):
                 copied_tool_calls: list[Any] | None = None
                 for tc_idx, tc in enumerate(tool_calls):
                     if isinstance(tc, dict):
+                        missing_gemini_signature = (
+                            not strip_extra_content
+                            and msg.get("role") == "assistant"
+                            and isinstance(tc.get("function"), dict)
+                            and not _tool_call_has_gemini_signature(tc)
+                        )
                         should_copy_tc = (
                             "call_id" in tc
                             or "response_item_id" in tc
                             or (strip_extra_content and "extra_content" in tc)
+                            or missing_gemini_signature
                         )
                         if should_copy_tc:
                             if copied_tool_calls is None:
@@ -431,6 +461,22 @@ class ChatCompletionsTransport(ProviderTransport):
                             copied_tc.pop("response_item_id", None)
                             if strip_extra_content:
                                 copied_tc.pop("extra_content", None)
+                            elif missing_gemini_signature:
+                                # Cross-provider fallback can hand Gemini a tool
+                                # call produced by a provider that has no Google
+                                # thought signature. Gemini's OpenAI-compatible
+                                # endpoint rejects that history with HTTP 400.
+                                # Mirror the native Gemini adapter's documented
+                                # compatibility sentinel on the outgoing copy only.
+                                extra = copied_tc.get("extra_content")
+                                copied_extra = dict(extra) if isinstance(extra, dict) else {}
+                                google = copied_extra.get("google")
+                                copied_google = dict(google) if isinstance(google, dict) else {}
+                                copied_google["thought_signature"] = (
+                                    _GEMINI_TOOL_CALL_SIGNATURE_SENTINEL
+                                )
+                                copied_extra["google"] = copied_google
+                                copied_tc["extra_content"] = copied_extra
                             copied_tool_calls[tc_idx] = copied_tc
                 if copied_tool_calls is not None:
                     mutable_msg()["tool_calls"] = copied_tool_calls
