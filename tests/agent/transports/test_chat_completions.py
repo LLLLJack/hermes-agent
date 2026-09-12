@@ -203,6 +203,36 @@ class TestChatCompletionsBasic:
         msgs = [{"role": "user", "content": "hi"}]
         assert transport.convert_messages(msgs) is msgs
 
+    def test_convert_messages_adds_missing_gemini_tool_signature_sentinel(self, transport):
+        tool_call = {
+            "id": "call_foreign",
+            "type": "function",
+            "function": {"name": "terminal", "arguments": "{}"},
+            "extra_content": {"vendor": {"opaque": "keep-me"}},
+        }
+        msgs = [{"role": "assistant", "content": None, "tool_calls": [tool_call]}]
+
+        result = transport.convert_messages(msgs, model="google/gemini-3.8-flash")
+
+        assert result[0]["tool_calls"][0]["extra_content"] == {
+            "vendor": {"opaque": "keep-me"},
+            "google": {"thought_signature": "skip_thought_signature_validator"},
+        }
+        assert tool_call["extra_content"] == {"vendor": {"opaque": "keep-me"}}
+
+    def test_convert_messages_does_not_add_gemini_sentinel_to_non_gemini_target(self, transport):
+        tool_call = {
+            "id": "call_foreign",
+            "type": "function",
+            "function": {"name": "terminal", "arguments": "{}"},
+        }
+        msgs = [{"role": "assistant", "content": None, "tool_calls": [tool_call]}]
+
+        result = transport.convert_messages(msgs, model="gpt-5.6-sol")
+
+        assert result is msgs
+        assert "extra_content" not in tool_call
+
     def test_convert_messages_strips_internal_scaffolding_markers(self, transport):
         """Hermes-internal ``_``-prefixed markers must never reach the wire.
 
@@ -386,6 +416,24 @@ class TestChatCompletionsBuildKwargs:
         assert "thinking_config" not in kw["extra_body"]
         assert kw["extra_body"]["extra_body"]["google"]["thinking_config"] == {
             "include_thoughts": True,
+            "thinking_level": "high",
+        }
+
+    def test_vertex_reasoning_hides_thought_parts_without_disabling_thinking(self, transport):
+        from providers import get_provider_profile
+
+        profile = get_provider_profile("vertex")
+        kw = transport.build_kwargs(
+            model="google/gemini-3.8-flash",
+            messages=[{"role": "user", "content": "Hi"}],
+            provider_profile=profile,
+            provider_name="vertex",
+            base_url=profile.base_url,
+            reasoning_config={"enabled": True, "effort": "high"},
+        )
+
+        assert kw["extra_body"]["extra_body"]["google"]["thinking_config"] == {
+            "include_thoughts": False,
             "thinking_level": "high",
         }
 

@@ -20,6 +20,8 @@ class VertexProfile(ProviderProfile):
 
         raw = _build_gemini_thinking_config(context.get("model") or "", context.get("reasoning_config"))
         thinking_config = _snake_case_gemini_thinking_config(raw) if raw else None
+        if thinking_config:
+            thinking_config["include_thoughts"] = False
         return {"extra_body": {"google": {"thinking_config": thinking_config}}} if thinking_config else {}
 
     def fetch_models(

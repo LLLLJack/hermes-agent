@@ -209,6 +209,21 @@ def _model_consumes_thought_signature(model: Any) -> bool:
     return "gemini" in m or "gemma" in m
 
 
+_GEMINI_TOOL_CALL_SIGNATURE_SENTINEL = "skip_thought_signature_validator"
+
+
+def _tool_call_has_gemini_signature(tool_call: dict[str, Any]) -> bool:
+    """Whether a tool call already carries a non-empty Gemini thought signature."""
+    extra = tool_call.get("extra_content")
+    if not isinstance(extra, dict):
+        return False
+    google = extra.get("google") or extra.get("thought_signature")
+    if isinstance(google, dict):
+        signature = google.get("thought_signature") or google.get("thoughtSignature")
+        return isinstance(signature, str) and bool(signature)
+    return isinstance(google, str) and bool(google)
+
+
 def _attr_or_model_extra(obj: Any, name: str) -> Any:
     """``obj.<name>``, else the same key from pydantic ``model_extra`` (some SDKs park fields there)."""
     value = getattr(obj, name, None)
@@ -323,10 +338,25 @@ def _sanitize_message(msg: Any, strip_extra_content: bool) -> dict | None:
             keys = [k for k in _STRIP_TC_KEYS if k in tc]
             if strip_extra_content and "extra_content" in tc:
                 keys.append("extra_content")
-            if keys:
+            missing_gemini_signature = (
+                not strip_extra_content
+                and msg.get("role") == "assistant"
+                and isinstance(tc.get("function"), dict)
+                and not _tool_call_has_gemini_signature(tc)
+            )
+            if keys or missing_gemini_signature:
                 if copied_tool_calls is None:
                     copied_tool_calls = list(tool_calls)
-                copied_tool_calls[tc_idx] = {k: v for k, v in tc.items() if k not in keys}
+                copied_tool_call = {k: v for k, v in tc.items() if k not in keys}
+                if missing_gemini_signature:
+                    extra = copied_tool_call.get("extra_content")
+                    copied_extra = dict(extra) if isinstance(extra, dict) else {}
+                    google = copied_extra.get("google")
+                    copied_google = dict(google) if isinstance(google, dict) else {}
+                    copied_google["thought_signature"] = _GEMINI_TOOL_CALL_SIGNATURE_SENTINEL
+                    copied_extra["google"] = copied_google
+                    copied_tool_call["extra_content"] = copied_extra
+                copied_tool_calls[tc_idx] = copied_tool_call
         if copied_tool_calls is not None:
             out_msg["tool_calls"] = copied_tool_calls
     return out_msg if strip_keys or copied_tool_calls is not None else None

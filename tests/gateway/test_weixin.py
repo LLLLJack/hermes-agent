@@ -365,6 +365,7 @@ class TestWeixinOutboundMedia:
         adapter._token = "test-token"
         adapter._base_url = "https://weixin.example.com"
         adapter._cdn_base_url = "https://cdn.example.com/c2c"
+        adapter._cdn_upload_proxy = "http://172.19.0.1:18080"
         adapter._token_store.get = lambda account_id, chat_id: None
 
         aes_key = bytes(range(16))
@@ -382,6 +383,7 @@ class TestWeixinOutboundMedia:
         assert upload_url == "https://upload.example.com/media"
         assert upload_kwargs["headers"] == {"Content-Type": "application/octet-stream"}
         assert upload_kwargs["data"]
+        assert upload_kwargs["proxy"] == "http://172.19.0.1:18080"
         # Timeout is now enforced externally via asyncio.wait_for() rather than
         # aiohttp.ClientTimeout, so it no longer appears as a post() kwarg.
         assert "timeout" not in upload_kwargs
@@ -879,4 +881,3 @@ class TestWeixinVoiceGatewayHandoff:
             "VOICE event body leaked Tencent's STT text — runner would trust "
             "the wrong transcript instead of re-transcribing (#27300)."
         )
-

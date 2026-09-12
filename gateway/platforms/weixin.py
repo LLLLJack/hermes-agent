@@ -334,9 +334,17 @@ async def _get_upload_url(
     return await _api_post(session, base_url=base_url, endpoint=EP_GET_UPLOAD_URL, payload=payload, token=token, timeout_ms=API_TIMEOUT_MS)
 
 
-async def _upload_ciphertext(session: "aiohttp.ClientSession", *, ciphertext: bytes, upload_url: str) -> str:
+async def _upload_ciphertext(
+    session: "aiohttp.ClientSession", *, ciphertext: bytes, upload_url: str, proxy_url: str = ""
+) -> str:
     async def _do() -> str:
-        async with session.post(upload_url, data=ciphertext, headers={"Content-Type": "application/octet-stream"}) as response:
+        request_kwargs: Dict[str, Any] = {
+            "data": ciphertext,
+            "headers": {"Content-Type": "application/octet-stream"},
+        }
+        if proxy_url:
+            request_kwargs["proxy"] = proxy_url
+        async with session.post(upload_url, **request_kwargs) as response:
             encrypted_param = response.headers.get("x-encrypted-param") if response.status == 200 else None
             if encrypted_param:
                 await response.read()
@@ -711,6 +719,7 @@ class WeixinAdapter(BasePlatformAdapter):
         self._token = str(config.token or extra.get("token") or _wx_secret("WEIXIN_TOKEN", "")).strip()
         self._base_url = _extra_or_secret(extra, "base_url", ILINK_BASE_URL).rstrip("/")
         self._cdn_base_url = _extra_or_secret(extra, "cdn_base_url", WEIXIN_CDN_BASE_URL).rstrip("/")
+        self._cdn_upload_proxy = _extra_or_secret(extra, "cdn_upload_proxy")
         # Tunables: ``extra.<key>`` else env ``WEIXIN_<KEY>`` (e.g. WEIXIN_SEND_CHUNK_RETRIES).
         self._send_chunk_delay_seconds = float(_extra_or_env(extra, "send_chunk_delay_seconds", "1.5"))
         self._send_chunk_retries = int(_extra_or_env(extra, "send_chunk_retries", "4"))
@@ -1188,7 +1197,9 @@ class WeixinAdapter(BasePlatformAdapter):
             f"{self._cdn_base_url.rstrip('/')}/upload?encrypted_query_param={quote(upload_param, safe='')}&filekey={quote(filekey, safe='')}"))
         if not upload_url:
             raise RuntimeError(f"getUploadUrl returned neither upload_param nor upload_full_url: {upload_response}")
-        encrypted_query_param = await _upload_ciphertext(self._send_session, ciphertext=ciphertext, upload_url=upload_url)
+        encrypted_query_param = await _upload_ciphertext(
+            self._send_session, ciphertext=ciphertext, upload_url=upload_url, proxy_url=self._cdn_upload_proxy
+        )
         context_token = self._token_store.get(self._account_id, chat_id)
         # iLink expects aes_key as base64(hex_string), not base64(raw_bytes) — otherwise images render as grey boxes.
         item_kwargs = {

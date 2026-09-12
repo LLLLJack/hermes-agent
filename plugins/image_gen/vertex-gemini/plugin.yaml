@@ -1,0 +1,8 @@
+name: vertex-gemini
+version: 1.0.0
+description: "Local Vertex AI Gemini image generation and multi-reference editing backend."
+author: VPS local
+kind: backend
+requires_env:
+  - VERTEX_CREDENTIALS_PATH
+
