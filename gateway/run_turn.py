@@ -248,10 +248,21 @@ class GatewayTurnMixin:
             if not isinstance(config, dict):
                 config = {}
             gateway_runtime = dict(config.get("gateway_runtime") or {})
-            if row.get("model") == model and all(gateway_runtime.get(k) == v for k, v in runtime.items()):
+            # A top-level model+provider pair is an intentional persisted runtime snapshot
+            # (for example a newer Agent Web /model switch). An older concurrent Gateway turn
+            # must not tear that pair by writing only its stale model into the denormalized
+            # sessions.model column. Keep the selected snapshot authoritative while still
+            # recording this turn's actual runtime under gateway_runtime.
+            selected_model = str(config.get("model") or "").strip()
+            selected_provider = str(config.get("provider") or "").strip()
+            actual_provider = str(runtime.get("provider") or "").strip()
+            model_to_persist = model
+            if selected_model and selected_provider and (selected_model != model or selected_provider != actual_provider):
+                model_to_persist = selected_model
+            if row.get("model") == model_to_persist and all(gateway_runtime.get(k) == v for k, v in runtime.items()):
                 return
             config["gateway_runtime"] = runtime
-            db.update_session_meta(session_id, json.dumps(config), model=model)
+            db.update_session_meta(session_id, json.dumps(config), model=model_to_persist)
         except Exception:
             logger.debug("Failed to sync gateway session model metadata", exc_info=True)
 

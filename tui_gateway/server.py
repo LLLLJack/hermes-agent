@@ -1513,7 +1513,11 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
         return {}
     overrides: dict = {}
     field = lambda k: str(model_config.get(k) or "").strip()
-    model = str(row.get("model") or model_config.get("model") or "").strip()
+    # model_config is the atomic runtime snapshot written together with provider/base_url.
+    # Prefer its model over the denormalized row.model: a concurrent older Gateway turn can
+    # update only row.model after a newer /model switch and otherwise create a torn
+    # old-model + new-provider pair on resume.
+    model = str(model_config.get("model") or row.get("model") or "").strip()
     # ``billing_provider`` is only the billing bucket — for a custom endpoint the bare class "custom", which
     # agent_init treats as non-routable. Only restore an explicit provider; else resume uses the configured default.
     provider = field("provider")

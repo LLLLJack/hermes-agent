@@ -1754,7 +1754,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _stored_session_model(self, session: Any) -> Optional[str]:
         """The model persisted on a session row, minus the virtual alias (replaying
         "hermes-agent" upstream as a provider model id 400s)."""
-        stored = session.get("model") if isinstance(session, dict) else None
+        if not isinstance(session, dict):
+            return None
+        # Prefer the model from model_config because it is persisted as one runtime snapshot
+        # with provider/base_url. row.model is a denormalized convenience field and can be
+        # overwritten by an older concurrent Gateway turn after a newer /model switch.
+        config = self._parse_session_model_config(session.get("model_config"))
+        stored = self._clean_runtime_id(config.get("model")) or self._clean_runtime_id(session.get("model"))
         if not stored or stored == self._model_name:
             return None
         return stored

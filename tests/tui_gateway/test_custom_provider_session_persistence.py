@@ -730,6 +730,23 @@ def _agent_like(model="deepseek/deepseek-v4-flash-0731", provider=""):
     )
 
 
+def test_resume_prefers_atomic_model_config_over_torn_row_model():
+    from tui_gateway.server import _stored_session_runtime_overrides
+
+    overrides = _stored_session_runtime_overrides({
+        "model": "gemini-3.8-flash-high",
+        "billing_provider": "openai-codex",
+        "model_config": {
+            "model": "gpt-5.6-sol",
+            "provider": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_mode": "codex_responses",
+        },
+    })
+    assert overrides["model_override"]["model"] == "gpt-5.6-sol"
+    assert overrides["model_override"]["provider"] == "openai-codex"
+
+
 class TestRuntimeModelConfigDropsStaleKeys:
     def test_falsy_provider_drops_stale_existing_provider(self):
         """Agent inherits the profile default (empty provider): the previously

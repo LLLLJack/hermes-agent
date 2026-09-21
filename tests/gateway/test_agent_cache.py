@@ -26,6 +26,38 @@ def _make_runner():
     return runner
 
 
+def test_gateway_runtime_sync_does_not_tear_newer_model_provider_snapshot():
+    runner = _make_runner()
+    updates = {}
+
+    class FakeDB:
+        def get_session(self, session_id):
+            assert session_id == "shared-session"
+            return {
+                "model": "gpt-5.6-sol",
+                "model_config": '{"model":"gpt-5.6-sol","provider":"openai-codex"}',
+            }
+
+        def update_session_meta(self, session_id, model_config_json, model=None):
+            import json
+            updates["value"] = (session_id, json.loads(model_config_json), model)
+
+    runner._session_db = MagicMock(_db=FakeDB())
+    stale_agent = MagicMock(
+        model="gemini-3.8-flash-high", provider="antigravity-cli",
+        base_url="agy://official-cli", api_mode="chat_completions",
+        _fallback_activated=False,
+    )
+    runner._sync_session_model_from_agent("shared-session", stale_agent)
+
+    session_id, config, model = updates["value"]
+    assert session_id == "shared-session"
+    assert model == "gpt-5.6-sol"
+    assert config["model"] == "gpt-5.6-sol"
+    assert config["provider"] == "openai-codex"
+    assert config["gateway_runtime"]["provider"] == "antigravity-cli"
+
+
 class TestAgentConfigSignature:
     """Config signature produces stable, distinct keys."""
 

@@ -2720,6 +2720,14 @@ class TestStoredSessionModelFilter:
         adapter = _make_routing_adapter({})
         assert adapter._stored_session_model({"model": "google/gemini-3.7-flash"}) == "google/gemini-3.7-flash"
 
+    def test_atomic_model_config_wins_over_torn_row_model(self):
+        adapter = _make_routing_adapter({})
+        row = {
+            "model": "gemini-3.8-flash-high",
+            "model_config": {"model": "gpt-5.6-sol", "provider": "openai-codex"},
+        }
+        assert adapter._stored_session_model(row) == "gpt-5.6-sol"
+
     def test_missing_or_bad_shapes(self):
         adapter = _make_routing_adapter({})
         assert adapter._stored_session_model({}) is None
