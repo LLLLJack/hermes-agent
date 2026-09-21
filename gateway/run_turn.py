@@ -425,9 +425,29 @@ class GatewayTurnMixin:
 
     async def _hmwa_deliver_auto_reset_notice(self, session_entry, source, turn_sidecar_notes):
         """Stage the auto-reset sidecar note for the agent and notify the user (policy-gated)."""
-        from gateway.run import _AUTO_RESET_CONTEXT_NOTES
-        reset_reason = getattr(session_entry, 'auto_reset_reason', None) or 'suspended'
-        context_note = _AUTO_RESET_CONTEXT_NOTES.get(reset_reason, _AUTO_RESET_CONTEXT_NOTES["suspended"])
+        # Upstream removed idle/daily rotation and later narrowed this map to suspended only.
+        # The VPS compatibility rollover restored in r33 needs reason-specific notes so a fresh
+        # agent never mistakes an idle/daily boundary for a stopped session.
+        context_notes = {
+            "suspended": (
+                "[System note: The user's previous session was stopped and suspended. "
+                "This is a fresh conversation with no prior context.]"
+            ),
+            "daily": (
+                "[System note: The user's session was automatically reset by the daily schedule. "
+                "This is a fresh conversation with no prior context.]"
+            ),
+            "resume_pending_expired": (
+                "[System note: The previous gateway session could not be recovered after a restart "
+                "(API recovery timed out). This is a fresh conversation — use /resume to restore history if needed.]"
+            ),
+            "idle": (
+                "[System note: The user's previous session expired due to inactivity. "
+                "This is a fresh conversation with no prior context.]"
+            ),
+        }
+        reset_reason = getattr(session_entry, "auto_reset_reason", None) or "idle"
+        context_note = context_notes.get(reset_reason, context_notes["idle"])
         # Long-lived channels: point the agent at the prior same-channel session for session_search.
         try:
             # Returns None (appends nothing) for other platforms or when there's no prior activity to
@@ -440,13 +460,34 @@ class GatewayTurnMixin:
         turn_sidecar_notes.append(context_note)
 
         try:
-            should_notify = reset_reason == "suspended"
+            policy = getattr(self.session_store.config, "session_reset_policy", None)
+            platform_name = source.platform.value if source.platform else ""
+            # Stopped/recovery-expired sessions always explain the boundary. Idle/daily resets only
+            # notify when the prior conversation had activity and notifications remain enabled.
+            should_notify = reset_reason in {"suspended", "resume_pending_expired"} or bool(
+                policy
+                and policy.notify
+                and getattr(session_entry, "reset_had_activity", False)
+                and platform_name not in policy.notify_exclude_platforms
+            )
             adapter = self._adapter_for_source(source) if should_notify else None
             if adapter:
+                if reset_reason == "suspended":
+                    reason_text = "previous session was stopped or interrupted"
+                elif reset_reason == "resume_pending_expired":
+                    reason_text = "gateway restart recovery timed out"
+                elif reset_reason == "daily":
+                    reason_text = f"daily schedule at {policy.at_hour}:00"
+                else:
+                    idle_minutes = int(getattr(policy, "idle_minutes", 1440))
+                    hours, mins = divmod(idle_minutes, 60)
+                    duration = f"{hours}h" if not mins else f"{hours}h {mins}m" if hours else f"{mins}m"
+                    reason_text = f"inactive for {duration}"
                 notice = (
-                    "◐ Session reset after being stopped. "
-                    f"Conversation history cleared.\n"
-                    f"Use /resume to browse and restore a previous session.\n"
+                    f"◐ Session automatically reset ({reason_text}). "
+                    "Conversation history cleared.\n"
+                    "Use /resume to browse and restore a previous session.\n"
+                    "Adjust reset timing in config.yaml under session_reset."
                 )
                 with suppress(Exception):
                     session_info = await asyncio.to_thread(self._reset_notice_session_info, source)
