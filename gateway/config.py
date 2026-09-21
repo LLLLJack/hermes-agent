@@ -296,9 +296,11 @@ def persist_home_channel(home: HomeChannel, *, enabled_if_new: bool = False) -> 
 
 @dataclass
 class SessionResetPolicy:
-    """Inert legacy value type retained solely for the scheduled plugin-compat window.
+    """Local compatibility policy for user-activity-bound conversation rollover.
 
-    Gateway configuration and session lifecycle do not consume this datatype.
+    Upstream Hermes no longer rotates conversations by time. The VPS deployment deliberately
+    keeps its long-standing top-level session_reset policy, but evaluates it only when a real
+    user message next resolves the route (never from a background timer).
     """
     mode: str = "none"
     at_hour: int = 4  # 0-23, local time
@@ -523,6 +525,7 @@ _TOPLEVEL_BOOL_DEFAULTS = {
 class GatewayConfig:
     """Main gateway configuration: platform connections, session policies, delivery settings."""
     platforms: Dict[Platform, PlatformConfig] = field(default_factory=dict)
+    session_reset_policy: SessionResetPolicy = field(default_factory=SessionResetPolicy)
     reset_triggers: List[str] = field(default_factory=lambda: ["/new", "/reset"])
     quick_commands: Dict[str, Any] = field(default_factory=dict)  # slash commands that bypass the agent loop
     sessions_dir: Path = field(default_factory=lambda: get_hermes_home() / "sessions")
@@ -631,6 +634,7 @@ class GatewayConfig:
     def to_dict(self) -> Dict[str, Any]:
         return {
             "platforms": {p.value: c.to_dict() for p, c in self.platforms.items()},
+            "session_reset": self.session_reset_policy.to_dict(),
             "reset_triggers": self.reset_triggers,
             "quick_commands": self.quick_commands,
             "sessions_dir": str(self.sessions_dir),
@@ -706,6 +710,7 @@ class GatewayConfig:
 
         return cls(
             platforms=by_platform("platforms", PlatformConfig.from_dict, dicts_only=True),
+            session_reset_policy=SessionResetPolicy.from_dict(data.get("session_reset", {})),
             reset_triggers=data.get("reset_triggers", ["/new", "/reset"]),
             quick_commands=_coerce_dict(data.get("quick_commands", {})),
             sessions_dir=Path(data["sessions_dir"]) if "sessions_dir" in data else get_hermes_home() / "sessions",

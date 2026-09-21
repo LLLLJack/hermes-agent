@@ -80,9 +80,52 @@ class SessionLifecycleMixin:
             return False
         return bool(row is not None and row.get("end_reason") is not None)
 
-    def _route_reset_reason(self, entry: SessionEntry) -> Optional[str]:
-        """Only explicit suspension replaces a routed conversation; time never does."""
-        return "suspended" if entry.suspended else None
+    @staticmethod
+    def _policy_reset_reason(policy, updated_at: datetime) -> Optional[str]:
+        """Return idle/daily when the local compatibility policy is overdue."""
+        mode = str(getattr(policy, "mode", "none") or "none").strip().lower()
+        if mode not in {"idle", "daily", "both"}:
+            return None
+        now = _now()
+        if mode in {"idle", "both"}:
+            try:
+                idle_minutes = max(1, int(getattr(policy, "idle_minutes", 1440)))
+            except (TypeError, ValueError):
+                idle_minutes = 1440
+            if now > updated_at + timedelta(minutes=idle_minutes):
+                return "idle"
+        if mode in {"daily", "both"}:
+            try:
+                at_hour = int(getattr(policy, "at_hour", 4))
+            except (TypeError, ValueError):
+                at_hour = 4
+            at_hour = min(23, max(0, at_hour))
+            today_reset = now.replace(hour=at_hour, minute=0, second=0, microsecond=0)
+            if now.hour < at_hour:
+                today_reset -= timedelta(days=1)
+            if updated_at < today_reset:
+                return "daily"
+        return None
+
+    def _route_reset_reason(self, entry: SessionEntry, *, allow_time_reset: bool = True) -> Optional[str]:
+        """Apply suspension plus the VPS user-activity rollover compatibility policy.
+
+        Only a real user activity lookup may rotate. API/webhook sessions are excluded, and
+        active background work keeps its owning conversation alive.
+        """
+        if entry.suspended:
+            return "suspended"
+        if not allow_time_reset:
+            return None
+        platform_value = str(getattr(getattr(entry, "platform", None), "value", "") or "")
+        if platform_value in {"api_server", "webhook"}:
+            return None
+        policy = getattr(self.config, "session_reset_policy", None)
+        if policy is None or str(getattr(policy, "mode", "none") or "none").strip().lower() == "none":
+            return None
+        if self._has_active_processes_safe(entry.session_key, context="scheduled session reset"):
+            return None
+        return self._policy_reset_reason(policy, entry.updated_at)
 
     def _update_entry(self, session_key: str, mutate) -> bool:
         """Apply ``mutate(entry)`` under ``_lock`` and full-save; False when the entry is missing
