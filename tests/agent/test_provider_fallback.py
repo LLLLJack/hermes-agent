@@ -47,6 +47,7 @@ class TestFallbackChainInit:
     def test_no_fallback(self):
         agent = _make_agent(fallback_model=None)
         assert agent._fallback_chain == []
+        assert agent._configured_fallback_chain == []
         assert agent._fallback_index == 0
         assert agent._fallback_model is None
 
@@ -192,6 +193,43 @@ class TestFallbackChainAdvancement:
             ]
             assert agent._try_activate_fallback() is True
             assert agent.model == "gpt-4o"
+
+    def test_plugin_client_without_sdk_base_url_or_api_key_uses_provider_profile(self):
+        """External provider clients may expose only chat/is_closed, not OpenAI SDK attrs."""
+        from types import SimpleNamespace
+
+        class PluginClient:
+            def __init__(self):
+                self.chat = MagicMock()
+                self.is_closed = False
+
+        client = PluginClient()
+        agent = _make_agent(
+            fallback_model=[{"provider": "antigravity-cli", "model": "gemini-3.8-flash-high"}]
+        )
+        agent.model = "gpt-5.6-sol"
+        agent.provider = "openai-codex"
+        agent.base_url = "https://chatgpt.com/backend-api/codex"
+        agent.context_compressor = None
+
+        with (
+            patch(
+                "agent.auxiliary_client.resolve_provider_client",
+                return_value=(client, "gemini-3.8-flash-high"),
+            ),
+            patch(
+                "providers.get_provider_profile",
+                return_value=SimpleNamespace(base_url="agy://official-cli"),
+            ),
+            patch("hermes_cli.timeouts.get_provider_request_timeout", return_value=None),
+        ):
+            assert agent._try_activate_fallback(FailoverReason.rate_limit) is True
+
+        assert agent.provider == "antigravity-cli"
+        assert agent.model == "gemini-3.8-flash-high"
+        assert agent.base_url == "agy://official-cli"
+        assert agent.client is client
+        assert agent.api_key == ""
 
     def test_resolves_key_env_for_fallback_provider(self):
         fbs = [

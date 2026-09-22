@@ -1670,6 +1670,30 @@ def _fallback_api_mode_hint(fb: dict, fb_provider: str, fb_base_url_hint: Option
     return False, "chat_completions"
 
 
+def _fallback_client_base_url(fb_client, fb_provider: str, fb_base_url_hint: Optional[str]) -> str:
+    """Resolve a fallback route URL without assuming an OpenAI-SDK-shaped client.
+
+    External/provider-plugin clients may intentionally expose only the chat surface (for
+    example antigravity-cli) and therefore have no ``base_url`` attribute.  The provider
+    profile is the authoritative fallback in that case.
+    """
+    direct = str(getattr(fb_client, "base_url", "") or "").strip()
+    if direct:
+        return direct
+    hinted = str(fb_base_url_hint or "").strip()
+    if hinted:
+        return hinted
+    try:
+        from providers import get_provider_profile
+        profile = get_provider_profile(fb_provider)
+        profiled = str(getattr(profile, "base_url", "") or "").strip()
+        if profiled:
+            return profiled
+    except Exception:
+        logger.debug("Could not resolve provider-profile base_url for fallback %s", fb_provider, exc_info=True)
+    return ""
+
+
 def _fallback_api_mode_resolved(agent, fb_provider: str, fb_model: str, fb_base_url: str) -> str:
     """Re-detect api_mode from provider / resolved base URL / model when the hint pass
     landed on the chat_completions default (never called for an explicit api_mode)."""
@@ -1874,7 +1898,11 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             except Exception as _norm_err:
                 logger.warning("Could not normalize fallback model %r for provider %r: %s", fb_model, fb_provider, _norm_err)
 
-            fb_base_url = str(fb_client.base_url)
+            fb_base_url = _fallback_client_base_url(fb_client, fb_provider, fb_base_url_hint)
+            if not fb_base_url:
+                raise RuntimeError(
+                    f"fallback provider {fb_provider!r} resolved a client without a base_url or provider-profile route"
+                )
             from hermes_cli.providers import is_actual_route
             if is_actual_route(fb_provider, fb_base_url):
                 fb_api_mode = "chat_completions"

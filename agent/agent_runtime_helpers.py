@@ -2103,19 +2103,24 @@ def _build_primary_runtime_snapshot(agent, api_mode) -> Dict[str, Any]:
 
 
 def _finish_switch(agent, new_provider, old_norm, new_norm) -> None:
-    """Post-switch bookkeeping: fallback reset/prune, request_overrides, billing route."""
+    """Post-switch bookkeeping: reset fallback traversal, request overrides, billing route.
+
+    ``fallback_providers`` is administrator policy, not disposable turn state.  Earlier
+    code destructively pruned the old/new providers on every manual switch, so repeated
+    switches could shrink a three-provider chain to one entry and then to empty.  Re-seed
+    from the configured copy instead; ``_should_skip_fallback_candidate`` already skips
+    the currently-active backend at activation time.
+    """
     agent._fallback_activated = False
     agent._provider_fallback_active = False
     agent._provider_fallback_route = None
     agent._fallback_index = 0
-    # On a deliberate provider swap, prune fallback entries targeting the OLD or NEW primary;
-    # otherwise a failed turn silently re-activates the provider the user just rejected.
-    fallback_chain = list(getattr(agent, "_fallback_chain", []) or [])
-    if old_norm and new_norm and old_norm != new_norm:
-        fallback_chain = [
-            entry for entry in fallback_chain
-            if (entry.get("provider") or "").strip().lower() not in {old_norm, new_norm}
-        ]
+    configured = getattr(agent, "_configured_fallback_chain", None)
+    if configured is None:
+        # Compatibility for agents created by older embeddings/tests. Preserve their
+        # current chain rather than inventing configuration that was never supplied.
+        configured = list(getattr(agent, "_fallback_chain", []) or [])
+    fallback_chain = [dict(entry) for entry in configured if isinstance(entry, dict)]
     agent._fallback_chain = fallback_chain
     agent._fallback_model = fallback_chain[0] if fallback_chain else None
     # Apply the switched-to provider's request_overrides (custom_providers extra_body).

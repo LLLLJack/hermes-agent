@@ -73,8 +73,12 @@ def _swap_fallback_clients(agent, fb_client, fb_provider: str, fb_model: str, fb
         bind_bedrock_runtime(agent, fb_base_url, fb_api_mode)
         return
     # The SDK exposes an empty/stale api_key when a rotating source is installed.
-    key_provider = vars(fb_client).get("_api_key_provider")
-    credential = key_provider if callable(key_provider) else fb_client.api_key
+    # Provider-plugin clients are allowed to expose only the chat surface, so neither
+    # ``api_key`` nor ``base_url`` is mandatory on the client object itself.
+    client_vars = vars(fb_client) if hasattr(fb_client, "__dict__") else {}
+    key_provider = client_vars.get("_api_key_provider")
+    credential = key_provider if callable(key_provider) else getattr(fb_client, "api_key", "")
+    sdk_shaped_client = hasattr(fb_client, "api_key") and hasattr(fb_client, "base_url")
     if fb_api_mode == "anthropic_messages":
         from agent.anthropic_adapter import build_anthropic_client
         from agent.anthropic_credentials import resolve_anthropic_token, _is_oauth_token
@@ -99,8 +103,10 @@ def _swap_fallback_clients(agent, fb_client, fb_provider: str, fb_model: str, fb
         agent._client_kwargs["default_headers"] = dict(fb_headers)
     if timeout is not None:
         agent._client_kwargs["timeout"] = timeout
-        # Rebuild now so the timeout applies to the very next request, not only after a rotation rebuild.
-        agent._replace_primary_openai_client(reason="fallback_timeout_apply")
+        # Rebuild only SDK-shaped HTTP clients. External/provider-plugin clients own
+        # their transport and must not be replaced by an OpenAI client.
+        if sdk_shaped_client:
+            agent._replace_primary_openai_client(reason="fallback_timeout_apply")
 
 
 class ClientLifecycleMixin:

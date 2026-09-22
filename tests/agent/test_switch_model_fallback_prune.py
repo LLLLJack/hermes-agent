@@ -1,10 +1,8 @@
-"""Regression test for TUI v2 blitz bug: explicit /model --provider switch
-silently fell back to the old primary provider on the next turn because the
-fallback chain — seeded from config at agent __init__ — kept entries for the
-provider the user just moved away from.
+"""Regression tests for configured fallback policy across manual model switches.
 
-Reported: "switched from openrouter provider to anthropic api key via hermes
-model and the tui keeps trying openrouter".
+The VPS uses an administrator-defined multi-provider chain.  A manual /model
+switch changes the primary route but must not destructively edit that policy;
+backend-identity checks skip the currently active route when fallback is needed.
 """
 
 from unittest.mock import MagicMock, patch
@@ -31,7 +29,8 @@ def _make_agent(chain):
     agent._primary_runtime = {}
     agent._fallback_activated = False
     agent._fallback_index = 0
-    agent._fallback_chain = list(chain)
+    agent._configured_fallback_chain = [dict(entry) for entry in chain]
+    agent._fallback_chain = [dict(entry) for entry in chain]
     agent._fallback_model = chain[0] if chain else None
 
     return agent
@@ -53,20 +52,38 @@ def _switch_to_anthropic(agent):
         )
 
 
-def test_switch_drops_old_primary_from_fallback_chain():
-    agent = _make_agent([
+def test_switch_preserves_configured_fallback_policy():
+    chain = [
         {"provider": "openrouter", "model": "x-ai/grok-4"},
         {"provider": "nous", "model": "hermes-4"},
-    ])
+    ]
+    agent = _make_agent(chain)
 
     _switch_to_anthropic(agent)
 
-    providers = [entry["provider"] for entry in agent._fallback_chain]
+    assert agent._fallback_chain == chain
+    assert agent._configured_fallback_chain == chain
+    assert agent._fallback_model == chain[0]
 
-    assert "openrouter" not in providers, "old primary must be pruned"
-    assert "anthropic" not in providers, "new primary is redundant in the chain"
-    assert providers == ["nous"]
-    assert agent._fallback_model == {"provider": "nous", "model": "hermes-4"}
+
+def test_repeated_switch_bookkeeping_reseeds_from_configured_policy():
+    from agent.agent_runtime_helpers import _finish_switch
+
+    chain = [
+        {"provider": "antigravity-cli", "model": "gemini-3.8-flash-high"},
+        {"provider": "vertex", "model": "google/gemini-3.8-flash"},
+        {"provider": "openai-codex", "model": "gpt-5.6-luna"},
+    ]
+    agent = _make_agent(chain)
+
+    # Simulate an already-traversed/shortened runtime view, then another manual switch.
+    agent._fallback_chain = [dict(chain[-1])]
+    agent._fallback_model = chain[-1]
+    _finish_switch(agent, "antigravity-cli", "openai-codex", "antigravity-cli")
+
+    assert agent._fallback_chain == chain
+    assert agent._fallback_model == chain[0]
+    assert agent._fallback_index == 0
 
 
 def test_switch_with_empty_chain_stays_empty():

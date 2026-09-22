@@ -1028,7 +1028,11 @@ def _init_fallback_chain(agent, fallback_model):
     sync_credential_pool_entry_id(agent)
 
     # Ordered backups tried when the primary is exhausted (legacy single-dict or list).
-    agent._fallback_chain = _fallback_entries(fallback_model)
+    # Keep an immutable-by-convention configured copy: manual /model switches are runtime
+    # choices and must not cumulatively destroy the administrator's fallback policy.
+    configured_chain = _fallback_entries(fallback_model)
+    agent._configured_fallback_chain = [dict(entry) for entry in configured_chain]
+    agent._fallback_chain = [dict(entry) for entry in configured_chain]
     agent._fallback_index = 0
     agent._fallback_activated = getattr(agent, "_fallback_activated", False)
     # Legacy attribute kept for backward compat (tests, external callers)
