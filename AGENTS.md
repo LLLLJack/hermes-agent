@@ -42,6 +42,16 @@ schema**, the one place where every addition is paid for on every API call. "Sma
 footprint" governs *how a capability is wired into the core*, not whether the product may
 grow: expansive at the edges, conservative at the waist.
 
+### VPS stable production maintenance (local fork rule)
+
+The upstream rules below describe contribution work against current `main`. For maintenance of this VPS's pinned production baseline, use a narrower path:
+
+- Reproduce from the actually deployed image/revision and its overlay first; do not assume current upstream `main` is the running code.
+- Check current upstream for an existing fix or relevant design before patching, then port the smallest compatible change that solves the observed production issue.
+- Do not automatically widen a stable-version hotfix into every sibling call path or a broad refactor unless production evidence shows the same bug class matters here. Upstream contribution work may still use the broader rule below.
+- Preserve the existing isolated-test rules: use temporary `HERMES_HOME`/fixtures and never let tests write the real `~/.hermes`; validate the exact production path before rollout.
+- Keep source revision, overlay files/fingerprints, image tag and rollback point explicit so a local patch is reproducible rather than a mystery live edit.
+
 ### What we want
 
 - **Fix real bugs, well.** Reproduce the symptom on current `main`, point to the exact line
