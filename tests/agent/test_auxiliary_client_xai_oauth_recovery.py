@@ -49,6 +49,27 @@ class TestIsAuthErrorXaiOauth403:
         exc.status_code = 403
         assert self.is_auth_error(exc) is False
 
+    @pytest.mark.parametrize("message", [
+        "HTTP 401: invalid authentication credentials",
+        "status 401 Unauthorized",
+        "status_code: 401 token expired",
+    ])
+    def test_textual_http_401_without_status_attribute_is_auth_error(self, message):
+        assert self.is_auth_error(RuntimeError(message)) is True
+
+    @pytest.mark.parametrize("message", [
+        "HTTP 4015 upstream error",
+        "status 4010 ms timeout",
+        "request id req-401-prod",
+    ])
+    def test_401_like_numbers_without_http_401_boundary_are_not_auth_error(self, message):
+        assert self.is_auth_error(RuntimeError(message)) is False
+
+    def test_concrete_non_auth_status_wins_over_text(self):
+        exc = RuntimeError("HTTP 401 Unauthorized")
+        exc.status_code = 429
+        assert self.is_auth_error(exc) is False
+
 
 
 

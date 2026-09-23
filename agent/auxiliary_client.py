@@ -3126,16 +3126,26 @@ def _transient_retry_count() -> int:
         return _DEFAULT_TRANSIENT_RETRIES
 
 
+_HTTP_401_RE = re.compile(r"\b(?:http|status(?:[ _]code)?\s*[:=]?)\s*401\b")
+
+
 def _is_auth_error(exc: Exception) -> bool:
     """Auth failures that should trigger provider-specific refresh."""
-    status = getattr(exc, "status_code", None)
+    status = getattr(exc, "status_code", None) or getattr(exc, "status", None)
     if status == 401:
         return True
     err_lower = str(exc).lower()
-    if "error code: 401" in err_lower or "authenticationerror" in type(exc).__name__.lower():
-        return True
     # xAI returns 403 "unauthenticated:bad-credentials" for expired OAuth tokens — semantically a 401.
-    return "bad-credentials" in err_lower and (status == 403 or "unauthenticated" in err_lower)
+    if "bad-credentials" in err_lower and (status == 403 or "unauthenticated" in err_lower):
+        return True
+    # A concrete non-auth status beats auth-looking prose. Some relays flatten HTTP failures to
+    # RuntimeError("HTTP 401: ...") and therefore expose no status_code attribute.
+    if isinstance(status, int) and status not in (0, 401):
+        return False
+    if (_HTTP_401_RE.search(err_lower) or "error code: 401" in err_lower
+            or "authenticationerror" in type(exc).__name__.lower()):
+        return True
+    return False
 
 
 def _is_unsupported_parameter_error(exc: Exception, param: str) -> bool:
