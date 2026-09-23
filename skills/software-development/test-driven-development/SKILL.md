@@ -15,42 +15,25 @@ metadata:
 
 ## Overview
 
-Write the test first. Watch it fail. Write minimal code to pass.
+For behavioral logic, bugs, and risky refactors, prefer a regression test that demonstrates the behavior before changing implementation, then make the smallest change that passes it.
 
-**Core principle:** If you didn't watch the test fail, you don't know if it tests the right thing.
-
-**Violating the letter of the rules is violating the spirit of the rules.**
+**Core principle:** Tests should prove the changed behavior and prevent regression. The value is evidence, not ritual order.
 
 ## When to Use
 
-**Always:**
-- New features
-- Bug fixes
-- Refactoring
-- Behavior changes
+Use RED→GREEN→REFACTOR especially for:
+- New behavioral logic with a clear executable contract
+- Bug fixes where a regression can be reproduced
+- Refactoring whose behavior must remain stable
+- High-risk edge cases that benefit from a focused test
 
-**Exceptions (ask the user first):**
-- Throwaway prototypes
-- Generated code
-- Configuration files
+Use proportionate verification instead for documentation, copy/style changes, configuration-only edits, generated artifacts, throwaway prototypes, or changes where a meaningful automated test would only mirror implementation. No extra user approval is needed merely to choose the appropriate verification method.
 
-Thinking "skip TDD just this once"? Stop. That's rationalization.
+## Existing Code and Test Order
 
-## The Iron Law
+When starting a new behavioral change, writing the regression first is preferred because it proves the test can fail for the intended reason.
 
-```
-NO PRODUCTION CODE WITHOUT A FAILING TEST FIRST
-```
-
-Write code before the test? Delete it. Start over.
-
-**No exceptions:**
-- Don't keep it as "reference"
-- Don't "adapt" it while writing tests
-- Don't look at it
-- Delete means delete
-
-Implement fresh from tests. Period.
+If correct implementation already exists — for example from an earlier iteration, a user-provided patch, or work completed before this Skill was loaded — **do not delete correct code merely to recreate RED→GREEN ordering**. Add or adjust the regression test, verify it exercises the relevant behavior (using a safe reproduction, targeted mutation, prior failing case, or other evidence when practical), then continue from the existing implementation.
 
 ## Red-Green-Refactor Cycle
 
@@ -94,7 +77,7 @@ Vague name, tests mock not real code.
 
 ### Verify RED — Watch It Fail
 
-**MANDATORY. Never skip.**
+For a new behavioral implementation, explicitly observe the regression fail when practical. If working from already-correct code, document equivalent evidence that the test protects the intended behavior rather than deleting the implementation to force a failure.
 
 ```bash
 # Use terminal tool to run the specific test

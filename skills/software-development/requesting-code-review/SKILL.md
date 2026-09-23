@@ -13,19 +13,18 @@ metadata:
 
 # Pre-Commit Code Verification
 
-Automated verification pipeline before code lands. Static scans, baseline-aware
-quality gates, an independent reviewer subagent, and an auto-fix loop.
+Risk-based verification before code lands. Use the existing diff, relevant tests/static checks, and an independent reviewer when the change risk or user request justifies one.
 
-**Core principle:** No agent should verify its own work. Fresh context finds what you miss.
+**Core principle:** Verification should add evidence for the changed risk; independent review is valuable for material changes, not a mandatory ceremony for every edit.
 
 ## When to Use
 
-- After implementing a feature or bug fix, before `git commit` or `git push`
-- When user says "commit", "push", "ship", "done", "verify", or "review before merge"
-- After completing a task with 2+ file edits in a git repo
-- After each task in subagent-driven-development (the two-stage review)
+Use this skill when:
+- The user explicitly asks for code review / verification before merge or commit
+- The change touches authentication, authorization, secrets, data integrity, API/schema contracts, concurrency, or other high-risk logic
+- A substantial multi-file change would materially benefit from an independent pass
 
-**Skip for:** documentation-only changes, pure config tweaks, or when user says "skip verification".
+Do not auto-trigger merely because a task is "done", has two files, or is about to be committed. Documentation-only, low-impact style/config changes and small local fixes should use the relevant direct checks unless the user explicitly asks for independent review.
 
 **This skill vs github:** This skill verifies YOUR changes before committing.
 `github` reviews OTHER people's PRs on GitHub with inline comments.
@@ -36,10 +35,7 @@ quality gates, an independent reviewer subagent, and an auto-fix loop.
 git diff --cached
 ```
 
-If empty, try `git diff` then `git diff HEAD~1 HEAD`.
-
-If `git diff --cached` is empty but `git diff` shows changes, tell the user to
-`git add <files>` first. If still empty, run `git status` — nothing to verify.
+If empty, use `git diff`; if the task was already committed, inspect the specific task commit/range. A readable unstaged diff is sufficient for review — do **not** require the user to stage files first. If no relevant diff exists, use `git status` and identify the intended task range rather than staging unrelated work.
 
 If the diff exceeds 15,000 characters, split by file:
 ```bash
@@ -49,7 +45,7 @@ git diff HEAD -- specific_file.py
 
 ## Step 2 — Static security scan
 
-Scan added lines only. Any match is a security concern fed into Step 5.
+Scan added lines from the same task diff selected in Step 1. The examples below use `git diff --cached`; substitute the equivalent unstaged or commit-range diff when that is what you are reviewing. Any match is a security concern fed into Step 5.
 
 ```bash
 # Hardcoded secrets
@@ -68,13 +64,13 @@ git diff --cached | grep "^+" | grep -E "pickle\.loads?\("
 git diff --cached | grep "^+" | grep -E "execute\(f\"|\.format\(.*SELECT|\.format\(.*INSERT"
 ```
 
-## Step 3 — Baseline tests and linting
+## Step 3 — Relevant tests and linting
 
-Detect the project language and run the appropriate tools. Capture the failure
-count BEFORE your changes as **baseline_failures** (stash changes, run, pop).
+Use the repository's own instructions and the changed surface to choose checks. Start with the directly affected tests/typecheck/lint; run a full suite when shared contracts, security boundaries, cross-module behavior, or release policy requires it. Do not stash user work merely to manufacture a baseline. If a known baseline failure matters, compare against an already recorded baseline or a safe isolated checkout.
+
 Only NEW failures introduced by your changes block the commit.
 
-**Test frameworks** (auto-detect by project files):
+**Examples — choose only what matches the project:**
 ```bash
 # Python (pytest)
 python -m pytest --tb=no -q 2>&1 | tail -5
@@ -122,12 +118,11 @@ Quick scan before dispatching the reviewer:
 - [ ] No commented-out code
 - [ ] New code has tests (if test suite exists)
 
-## Step 5 — Independent reviewer subagent
+## Step 5 — Independent reviewer (when warranted)
 
-Call `delegate_task` directly — it is NOT available inside execute_code or scripts.
+If the change risk or user request warrants independent review, call `delegate_task` directly — it is NOT available inside execute_code or scripts. For a small low-risk change, the relevant checks plus direct diff review can complete verification without spawning another agent.
 
-The reviewer gets ONLY the diff and static scan results. No shared context with
-the implementer. Fail-closed: unparseable response = fail.
+When used, the reviewer gets ONLY the diff and static scan results. No shared context with the implementer. Fail-closed: unparseable response = fail.
 
 ```python
 delegate_task(
@@ -175,9 +170,9 @@ Return ONLY this JSON:
 
 ## Step 6 — Evaluate results
 
-Combine results from Steps 2, 3, and 5.
+Combine the checks actually applicable from Steps 2, 3, and 5. If Step 5 was not warranted, do not treat the absence of a reviewer as a failure.
 
-**All passed:** Proceed to Step 8 (commit).
+**All applicable checks passed:** Proceed to Step 8 (commit).
 
 **Any failures:** Report what failed, then proceed to Step 7 (auto-fix).
 
@@ -195,8 +190,7 @@ Suggestions (non-blocking): [list]
 
 **Maximum 2 fix-and-reverify cycles.**
 
-Spawn a THIRD agent context — not you (the implementer), not the reviewer.
-It fixes ONLY the reported issues:
+The original implementer/controller may fix a concrete reported issue when it is small and well understood. Use a fresh fixer only when independent context or task isolation adds value. Whichever executor fixes it must address ONLY the reported issues:
 
 ```python
 delegate_task(
@@ -230,10 +224,10 @@ After the fix agent completes, re-run Steps 1-6 (full verification cycle).
 If verification passed:
 
 ```bash
-git add -A && git commit -m "[verified] <description>"
+git add path/to/task_file path/to/task_test && git commit -m "<type>: <description>"
 ```
 
-The `[verified]` prefix indicates an independent reviewer approved this change.
+Stage only files belonging to this logical task. A special `[verified]` commit prefix is optional project convention, not proof by itself and not required by this Skill.
 
 ## Reference: Common Patterns to Flag
 
@@ -260,8 +254,7 @@ element.textContent = userInput;
 
 ## Integration with Other Skills
 
-**subagent-driven-development:** Run this after EACH task as the quality gate.
-The two-stage review (spec compliance + code quality) uses this pipeline.
+**subagent-driven-development:** Use this as an independent quality gate when the delegated change is high-risk, cross-cutting, or explicitly requested — not automatically after every task.
 
 **test-driven-development:** This pipeline verifies TDD discipline was followed —
 tests exist, tests pass, no regressions.

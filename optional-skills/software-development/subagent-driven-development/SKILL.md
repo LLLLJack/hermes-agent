@@ -15,23 +15,24 @@ metadata:
 
 ## Overview
 
-Execute implementation plans by dispatching fresh subagents per task with systematic two-stage review.
+Execute implementation plans with selective delegation: use subagents when tasks are genuinely separable or independent review materially reduces risk, and keep cohesive/local work in the controller when delegation would only add overhead.
 
-**Core principle:** Fresh subagent per task + two-stage review (spec then quality) = high quality, fast iteration.
+**Core principle:** Delegate for clear parallelism, isolation, or review value — not because every task needs a fresh implementer and two reviewers.
 
 ## When to Use
 
 Use this skill when:
-- You have an implementation plan (from the `plan` skill or user requirements)
-- Tasks are mostly independent
-- Quality and spec compliance are important
-- You want automated review between tasks
+- You have a multi-part implementation where tasks can be separated cleanly
+- Parallel investigation/implementation will save time without creating merge conflicts
+- A security, data-integrity, API, or other high-risk change benefits from independent review
+- A focused subagent can work from a bounded context more effectively than the controller
 
-**vs. manual execution:**
-- Fresh context per task (no confusion from accumulated state)
-- Automated review process catches issues early
-- Consistent quality checks across all tasks
-- Subagents can ask questions before starting work
+Prefer direct execution for small or tightly coupled changes, single-file fixes, and work where the controller already has the necessary context. A user request to implement is already authorization to proceed within scope; delegation must not create a second approval gate.
+
+**Delegation benefit:**
+- Fresh context can isolate a bounded task
+- Independent review can catch concrete high-risk defects
+- Parallel tasks can reduce wall-clock time when they do not touch the same state
 
 ## The Process
 
@@ -55,7 +56,7 @@ todo([
 
 ### 2. Per-Task Workflow
 
-For EACH task in the plan:
+For each task you choose to delegate (not every task must be delegated):
 
 #### Step 1: Dispatch Implementer Subagent
 
@@ -77,7 +78,7 @@ delegate_task(
     3. Write minimal implementation
     4. Run: pytest tests/models/test_user.py -v (verify PASS)
     5. Run: pytest tests/ -q (verify no regressions)
-    6. Commit: git add -A && git commit -m "feat: add User model with password hashing"
+    6. Commit only task files: git add src/models/user.py tests/models/test_user.py && git commit -m "feat: add User model with password hashing"
 
     PROJECT CONTEXT:
     - Python 3.11, Flask app in src/app.py
@@ -116,7 +117,7 @@ delegate_task(
 )
 ```
 
-**If spec issues found:** Fix gaps, then re-run spec review. Continue only when spec-compliant.
+Use a separate spec reviewer when requirements are complex, ambiguous, or high-risk. For routine tasks, the controller may compare the diff against the task directly. If a reviewer finds a **specific** gap, fix it and re-review the affected area; do not open another review round when no defect was found.
 
 #### Step 3: Dispatch Code Quality Reviewer
 
@@ -148,7 +149,7 @@ delegate_task(
 )
 ```
 
-**If quality issues found:** Fix issues, re-review. Continue only when approved.
+Use a separate quality reviewer when change risk justifies it. If concrete critical/important issues are found, fix and re-review the affected area. Stop when the identified issues are resolved; do not repeat review simply to obtain another approval.
 
 #### Step 4: Mark Complete
 
@@ -158,7 +159,7 @@ todo([{"id": "task-1", "content": "Create User model with email field", "status"
 
 ### 3. Final Review
 
-After ALL tasks are complete, dispatch a final integration reviewer:
+For cross-cutting, high-risk, or independently implemented work, an integration reviewer can be useful after all tasks are complete. For a small cohesive change, verify integration directly and skip a redundant reviewer:
 
 ```python
 delegate_task(
@@ -177,19 +178,19 @@ delegate_task(
 ### 4. Verify and Commit
 
 ```bash
-# Run full test suite
-pytest tests/ -q
+# Run tests relevant to the changed behavior; use the full suite when project/risk requires it
+pytest tests/path/to/affected_tests.py -q
 
-# Review all changes
+# Review all task changes
 git diff --stat
 
-# Final commit if needed
-git add -A && git commit -m "feat: complete [feature name] implementation"
+# Commit only the files belonging to this logical task
+git add path/to/changed_file path/to/test_file && git commit -m "feat: complete [feature name] implementation"
 ```
 
 ## Task Granularity
 
-**Each task = 2-5 minutes of focused work.**
+Size tasks around coherent, reviewable deliverables. Avoid both giant ambiguous tasks and artificial 2–5 minute fragmentation that creates needless handoffs.
 
 **Too big:**
 - "Implement user authentication system"
@@ -203,18 +204,12 @@ git add -A && git commit -m "feat: complete [feature name] implementation"
 
 ## Red Flags — Never Do These
 
-- Start implementation without a plan
-- Skip reviews (spec compliance OR code quality)
-- Proceed with unfixed critical/important issues
-- Dispatch multiple implementation subagents for tasks that touch the same files
-- Make subagent read the plan file (provide full text in context instead)
-- Skip scene-setting context (subagent needs to understand where the task fits)
-- Ignore subagent questions (answer before letting them proceed)
-- Accept "close enough" on spec compliance
-- Skip review loops (reviewer found issues → implementer fixes → review again)
-- Let implementer self-review replace actual review (both are needed)
-- **Start code quality review before spec compliance is PASS** (wrong order)
-- Move to next task while either review has open issues
+- Delegate tightly coupled tasks to multiple agents editing the same files concurrently
+- Proceed with known critical/important issues
+- Give a subagent too little context to understand its bounded task
+- Ignore a concrete reviewer finding without resolving or explicitly accepting the risk
+- Re-run reviewers when no defect was found merely to obtain another approval
+- Stage or commit unrelated files while completing a delegated task
 
 ## Handling Issues
 
@@ -226,31 +221,27 @@ git add -A && git commit -m "feat: complete [feature name] implementation"
 
 ### If Reviewer Finds Issues
 
-- Implementer subagent (or a new one) fixes them
-- Reviewer reviews again
-- Repeat until approved
-- Don't skip the re-review
+- The implementer or controller fixes the specific issues; a new fixer is optional, not mandatory
+- Re-review the affected area when the issue is material
+- Bound fix-and-reverify loops (normally at most two); if a concrete defect remains, escalate instead of looping indefinitely
 
 ### If Subagent Fails a Task
 
-- Dispatch a new fix subagent with specific instructions about what went wrong
-- Don't try to fix manually in the controller session (context pollution)
+- Fix locally in the controller when the issue is small and context is already available, or dispatch a new focused subagent when isolation would help
+- Preserve the original task scope; do not spawn replacement agents reflexively
 
 ## Efficiency Notes
 
-**Why fresh subagent per task:**
-- Prevents context pollution from accumulated state
-- Each subagent gets clean, focused context
-- No confusion from prior tasks' code or reasoning
+**When fresh subagents help:**
+- A task has a clean boundary and benefits from isolated context
+- Several tasks can proceed independently without touching the same state
+- A high-risk change benefits from a genuinely independent reviewer
 
-**Why two-stage review:**
-- Spec review catches under/over-building early
-- Quality review ensures the implementation is well-built
-- Catches issues before they compound across tasks
+**When review layers help:**
+- Spec review catches material scope/compliance gaps on complex requirements
+- Quality/security review can catch defects on risky changes
 
-**Cost trade-off:**
-- More subagent invocations (implementer + 2 reviewers per task)
-- But catches issues early (cheaper than debugging compounded problems later)
+Every extra agent has cost and coordination overhead. Use only the layers that add evidence for the current task.
 
 ## Integration with Other Skills
 
@@ -262,17 +253,11 @@ This skill EXECUTES plans created by the `plan` skill:
 
 ### With test-driven-development
 
-Implementer subagents should follow TDD:
-1. Write failing test first
-2. Implement minimal code
-3. Verify test passes
-4. Commit
-
-Include TDD instructions in every implementer context.
+For behavioral logic and bug fixes, use appropriate regression/TDD guidance from `test-driven-development`. Low-impact docs, style, configuration, or already-correct implementation should use the verification that fits the change instead of forcing a RED/GREEN ritual.
 
 ### With requesting-code-review
 
-The two-stage review process IS the code review. For final integration review, use the requesting-code-review skill's review dimensions.
+Use `requesting-code-review` when an independent review is warranted by risk or explicitly requested; do not automatically run it after every delegated task.
 
 ### With systematic-debugging
 
