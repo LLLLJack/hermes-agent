@@ -3536,10 +3536,14 @@ def _refresh_xai_oauth_credentials() -> bool:
 
 
 def _refresh_vertex_credentials() -> bool:
-    """Mirrors run_agent's Vertex refresh; the cache key ignores the rotating bearer, so
-    without the eviction that follows, a ~1h-expired aux Vertex client 401s forever."""
+    """Force-mint a Vertex bearer after an auth failure, then let the caller evict clients.
+
+    A server-side 401 is authoritative even when google-auth still considers the
+    cached access token unexpired; merely re-reading that cached token recreates a
+    client with the same rejected bearer and loops on 401.
+    """
     from agent.vertex_adapter import get_vertex_config
-    token, base_url = get_vertex_config()
+    token, base_url = get_vertex_config(force_refresh=True)
     return bool(isinstance(token, str) and token.strip() and isinstance(base_url, str) and base_url.strip())
 
 

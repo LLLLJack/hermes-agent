@@ -283,3 +283,26 @@ def test_metadata_preserving_rotation_invalidates_creds_cache(vertex_adapter, mo
     (key2,) = vertex_adapter._creds_cache
     assert key2 != key1, "content change must produce a new cache key"
     assert vertex_adapter._creds_cache[key2][0] is not creds_obj_1
+
+def test_force_refresh_remints_even_when_cached_token_is_not_near_expiry(vertex_adapter, monkeypatch, tmp_path):
+    sa_file = tmp_path / 'sa.json'
+    sa_file.write_text('{"project_id": "identity"}')
+    monkeypatch.setattr(vertex_adapter, '_resolve_credentials_path', lambda explicit=None: str(sa_file))
+
+    token, project = vertex_adapter.get_vertex_credentials()
+    assert token == 'ya29.FAKE'
+    (key,) = vertex_adapter._creds_cache
+    creds = vertex_adapter._creds_cache[key][0]
+    calls = {'n': 0}
+    original_refresh = creds.refresh
+
+    def counted_refresh(req):
+        calls['n'] += 1
+        return original_refresh(req)
+
+    creds.refresh = counted_refresh
+    monkeypatch.setattr(vertex_adapter, '_needs_refresh', lambda _creds: False)
+    token2, project2 = vertex_adapter.get_vertex_credentials(force_refresh=True)
+    assert token2 == 'ya29.FAKE'
+    assert project2 == project
+    assert calls['n'] == 1

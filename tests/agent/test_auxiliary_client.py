@@ -2804,7 +2804,7 @@ class TestAuxiliaryAuthRefreshRetry:
 
             assert _refresh_provider_credentials("vertex") is True
 
-        mock_get_config.assert_called_once()
+        mock_get_config.assert_called_once_with(force_refresh=True)
         stale_client.close.assert_called_once()
 
     def test_refresh_provider_credentials_vertex_returns_false_when_unminted(self):
