@@ -1121,6 +1121,19 @@ def restore_primary_runtime(agent) -> bool:
     rt = agent._primary_runtime
     primary_provider = str((rt or {}).get("provider") or "").strip().lower()
     primary_model = str((rt or {}).get("model") or "").strip()
+    if primary_provider == "openai-codex" and primary_model:
+        try:
+            from agent.codex_quota_guard import route_decision
+            quota = route_decision(
+                agent, primary_provider, primary_model,
+                base_url=str((rt or {}).get("base_url") or "").strip() or None,
+                api_key=None,
+            )
+            if quota.blocked:
+                logger.info("Primary restore held by Codex quota guard: %s", quota.reason)
+                return False
+        except Exception:
+            logger.debug("Codex quota guard failed during primary restore; fail-open", exc_info=True)
     from agent.fallback_cooldown import _is_entitlement_rejected
     if primary_model and _is_entitlement_rejected(agent, primary_provider, primary_model):
         # The primary slug was rejected as unentitled for this account (#106475): restoring

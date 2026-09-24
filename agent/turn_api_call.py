@@ -193,6 +193,72 @@ def handle_api_interrupt(
 
 
 @dataclass
+class CodexQuotaGuardVerdict:
+    """Same phase contract as the Nous guard: fall through, restart on fallback, or end if no fallback exists."""
+
+    action: str
+    active_system_prompt: Any
+    retry_count: Any
+    compression_attempts: Any
+    result: Optional[Dict[str, Any]] = None
+
+
+def codex_quota_guard(
+    agent: Any, *, _retry: Any, api_messages: Any, messages: Any, conversation_history: Any,
+    active_system_prompt: Any, retry_count: Any, compression_attempts: Any, api_call_count: Any,
+) -> CodexQuotaGuardVerdict:
+    """Before a Codex request, enforce the external quota-protection policy.
+
+    An already-running provider request is never interrupted: this phase runs only before
+    dispatching the next inference.  A blocked route uses Hermes' normal fallback machinery,
+    so the same turn continues with rebuilt request state on the allowed fallback.
+    """
+    from agent.conversation_loop import _arm_fallback_restart
+
+    def _verdict(action: str, result: Optional[Dict[str, Any]] = None) -> CodexQuotaGuardVerdict:
+        return CodexQuotaGuardVerdict(
+            action=action, active_system_prompt=active_system_prompt, retry_count=retry_count,
+            compression_attempts=compression_attempts, result=result,
+        )
+
+    if str(getattr(agent, "provider", "") or "").strip().lower() != "openai-codex":
+        return _verdict("fallthrough")
+    try:
+        from agent.codex_quota_guard import route_decision
+        quota = route_decision(agent)
+    except Exception:
+        logger.debug("Codex quota guard evaluation failed; fail-open", exc_info=True)
+        return _verdict("fallthrough")
+    if not quota.blocked:
+        return _verdict("fallthrough")
+
+    msg = quota.reason or "Codex quota protection is active"
+    agent._buffer_vprint(f"🛡️ {msg}. Trying fallback...")
+    agent._buffer_status(f"🛡️ {msg}. Trying fallback...")
+    from agent.error_classifier import FailoverReason
+    if agent._try_activate_fallback(reason=FailoverReason.quota_policy):
+        active_system_prompt = _arm_fallback_restart(agent, api_messages, active_system_prompt, _retry)
+        retry_count = 0
+        compression_attempts = 0
+        return _verdict("break")
+
+    agent._flush_status_buffer()
+    agent._persist_session(messages, conversation_history)
+    return _verdict("return", {
+        "final_response": (
+            f"🛡️ {msg}.\n\n"
+            "The selected Codex route is temporarily reserved by quota policy and no allowed fallback "
+            "provider is available. Choose an allowed model or adjust the quota policy."
+        ),
+        "messages": messages,
+        "api_calls": api_call_count,
+        "completed": False,
+        "failed": True,
+        "error": msg,
+    })
+
+
+@dataclass
 class NousRateGuardVerdict:
     """``action``: ``"fallthrough"`` (no active limit — make the call), ``"break"``
     (fallback armed on ``_retry``) or ``"return"`` (``result``: no fallback available)."""

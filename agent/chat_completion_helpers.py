@@ -1623,6 +1623,7 @@ _FALLBACK_REASON_LABELS = {
     FailoverReason.billing: "billing or quota exhausted",
     FailoverReason.rate_limit: "rate limit",
     FailoverReason.upstream_rate_limit: "upstream model rate limit",
+    FailoverReason.quota_policy: "quota protection",
     FailoverReason.overloaded: "provider overloaded",
     FailoverReason.server_error: "provider server error",
     FailoverReason.timeout: "request timeout",
@@ -1758,6 +1759,18 @@ def _should_skip_fallback_candidate(agent, fb: dict, fb_key: tuple, fb_provider:
         return True
     if not fb_provider or not fb_model:
         return True
+    if fb_provider == "openai-codex":
+        try:
+            from agent.codex_quota_guard import route_decision
+            quota = route_decision(
+                agent, fb_provider, fb_model,
+                base_url=str(fb.get("base_url") or "").strip() or None,
+            )
+            if quota.blocked:
+                logger.info("Fallback skip: %s/%s blocked by %s", fb_provider, fb_model, quota.reason)
+                return True
+        except Exception:
+            logger.debug("Codex quota guard failed while evaluating fallback candidate; fail-open", exc_info=True)
     from agent.fallback_cooldown import _is_entitlement_rejected
     if _is_entitlement_rejected(agent, fb_provider, fb_model):
         logger.info("Fallback skip: %s/%s was rejected as unentitled for this account", fb_provider, fb_model)

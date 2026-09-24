@@ -299,7 +299,15 @@ def _resolve_codex_usage_credentials(
     pool select. Native OAuth stores device-code logins in the pool, so the singleton store alone is not enough."""
     explicit_key = str(api_key or "").strip()
     if explicit_key:
-        return explicit_key, str(base_url or "").strip(), None
+        account_id: Optional[str] = None
+        try:
+            from agent.codex_headers import codex_cloudflare_headers
+            account_id = codex_cloudflare_headers(
+                explicit_key, base_url=str(base_url or "").strip() or "https://chatgpt.com/backend-api/codex"
+            ).get("ChatGPT-Account-ID")
+        except Exception:
+            logger.debug("codex ▸ explicit /usage account_id decode failed (best-effort)", exc_info=True)
+        return explicit_key, str(base_url or "").strip(), account_id
     # Only AuthError is caught so tier 3 can run: a broad except would mask a transient refresh/network failure
     # and hand back a DIFFERENT pool account's usage; such errors must propagate to the fail-open outer guard.
     # account_id is best-effort: a partial singleton store must not sink a usable credential.
@@ -367,10 +375,10 @@ def _plural(count: int) -> str:
 
 
 def _fetch_codex_account_usage(
-    base_url: Optional[str] = None, api_key: Optional[str] = None,
+    base_url: Optional[str] = None, api_key: Optional[str] = None, *, timeout: float = 15.0,
 ) -> Optional[AccountUsageSnapshot]:
     token, resolved_base_url, account_id = _resolve_codex_usage_credentials(base_url, api_key)
-    payload = _get_json(_codex_backend_urls(resolved_base_url)[0], _codex_headers(token, account_id), timeout=15.0)
+    payload = _get_json(_codex_backend_urls(resolved_base_url)[0], _codex_headers(token, account_id), timeout=timeout)
     windows = _usage_windows(payload.get("rate_limit") or {}, (("primary_window", "Session"), ("secondary_window", "Weekly")),
                              "used_percent", "reset_at")
     details: list[str] = []

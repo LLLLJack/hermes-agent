@@ -201,3 +201,18 @@ def test_fetch_account_usage_openrouter_omits_quota_window_when_key_has_no_limit
     assert snapshot.windows == ()
     assert "Credits balance: $74.50" in snapshot.details
     assert "API key usage: $25.50 total • $1.25 today • $4.50 this week • $18.00 this month" in snapshot.details
+
+
+def test_explicit_codex_usage_token_derives_account_id(monkeypatch):
+    from agent.account_usage import _resolve_codex_usage_credentials
+
+    monkeypatch.setattr(
+        "agent.codex_headers.codex_cloudflare_headers",
+        lambda token, base_url: {"ChatGPT-Account-ID": "acct_explicit"},
+    )
+    token, base_url, account_id = _resolve_codex_usage_credentials(
+        "https://chatgpt.com/backend-api/codex", "access-token"
+    )
+    assert token == "access-token"
+    assert base_url == "https://chatgpt.com/backend-api/codex"
+    assert account_id == "acct_explicit"
