@@ -1856,7 +1856,7 @@ def _persist_fallback_display_notice(agent, model: str, provider: str) -> None:
     """Append a display-only fallback marker to durable session history.
 
     ``role=user`` matches Hermes' existing presentation-metadata convention, while
-    ``display_kind=model_fallback`` keeps the row out of provider-bound context and lets
+    ``display_kind=model_fallback`` keeps the row distinct from authored user text and lets
     Agent Web render it as a compact system/timeline notice.  Manual ``model_switch``
     rows are intentionally untouched and remain hidden by Agent Web.
     """
