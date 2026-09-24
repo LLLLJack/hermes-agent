@@ -1852,6 +1852,43 @@ def _buffer_fallback_notice(agent, notice: str) -> None:
         agent._pending_fallback_notice = [str(pending), notice] if pending else [notice]
 
 
+def _persist_fallback_display_notice(agent, model: str, provider: str) -> None:
+    """Append a display-only fallback marker to durable session history.
+
+    ``role=user`` matches Hermes' existing presentation-metadata convention, while
+    ``display_kind=model_fallback`` keeps the row out of provider-bound context and lets
+    Agent Web render it as a compact system/timeline notice.  Manual ``model_switch``
+    rows are intentionally untouched and remain hidden by Agent Web.
+    """
+    db = getattr(agent, "_session_db", None)
+    session_id = str(getattr(agent, "session_id", "") or "").strip()
+    if db is None or not session_id:
+        return
+    try:
+        from hermes_cli.model_switch import format_model_for_display
+        display_model = format_model_for_display(str(model or "").strip()) or str(model or "").strip()
+        if "/" in display_model:
+            display_model = display_model.rsplit("/", 1)[-1]
+        display_text = f"已切换备用模型：{display_model}"
+        db.append_message(
+            session_id=session_id,
+            role="user",
+            content=display_text,
+            display_kind="model_fallback",
+            display_metadata={
+                "model": str(model or ""),
+                "provider": str(provider or ""),
+                "display_text": display_text,
+            },
+            compression_lock_holder=getattr(agent, "_active_compression_lock_holder", None),
+            turn_lease_holder=getattr(agent, "_active_session_turn_lease_holder", None),
+            turn_lease_ttl_seconds=getattr(agent, "_active_session_turn_lease_ttl_seconds", 300.0) or 300.0,
+        )
+    except Exception:
+        # A display-only marker must never break provider failover.
+        logger.debug("Failed to persist fallback display notice", exc_info=True)
+
+
 def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool:
     """Switch to the next fallback model/provider in the chain; False when exhausted. Swaps client,
     model slug and provider in place so the retry loop continues on the new backend; client
@@ -1945,6 +1982,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
                 remaining = max(0, math.ceil(agent._rate_limited_until - time.monotonic()))
                 notice += f" Primary retry eligible in ~{remaining} s; recovery is not guaranteed."
             _buffer_fallback_notice(agent, notice)
+            _persist_fallback_display_notice(agent, fb_model, fb_provider)
             # ``_fallback_activated`` is also reused by `/model --once` restoration; separate
             # provenance so the restore path only emits a recovery notice after a real fallback.
             agent._provider_fallback_active = True

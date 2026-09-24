@@ -548,3 +548,43 @@ class TestFallbackExtraBodyReResolution:
         agent.request_overrides["temperature"] = 0.2
         self._activate(agent)
         assert agent.request_overrides.get("temperature") == 0.2
+
+def test_fallback_persists_display_only_system_timeline_notice():
+    agent = _make_agent(fallback_model={"provider": "vertex", "model": "google/gemini-3.8-flash"})
+    agent.model = "gpt-5.6-sol"
+    agent.provider = "openai-codex"
+    agent.session_id = "session-123"
+    agent._session_db = MagicMock()
+    agent._active_session_turn_lease_holder = "lease-123"
+    agent._active_session_turn_lease_ttl_seconds = 321
+    with patch(
+        "agent.auxiliary_client.resolve_provider_client",
+        return_value=(_mock_client(base_url="https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi/"), "google/gemini-3.8-flash"),
+    ):
+        assert agent._try_activate_fallback(FailoverReason.rate_limit) is True
+
+    agent._session_db.append_message.assert_called_once()
+    kwargs = agent._session_db.append_message.call_args.kwargs
+    assert kwargs["session_id"] == "session-123"
+    assert kwargs["role"] == "user"
+    assert kwargs["content"] == "已切换备用模型：gemini-3.8-flash"
+    assert kwargs["display_kind"] == "model_fallback"
+    assert kwargs["display_metadata"]["model"] == "google/gemini-3.8-flash"
+    assert kwargs["display_metadata"]["provider"] == "vertex"
+    assert kwargs["turn_lease_holder"] == "lease-123"
+    assert kwargs["turn_lease_ttl_seconds"] == 321
+
+
+def test_fallback_display_notice_persistence_failure_never_breaks_failover():
+    agent = _make_agent(fallback_model={"provider": "vertex", "model": "google/gemini-3.8-flash"})
+    agent.model = "gpt-5.6-sol"
+    agent.provider = "openai-codex"
+    agent.session_id = "session-123"
+    agent._session_db = MagicMock()
+    agent._session_db.append_message.side_effect = RuntimeError("db busy")
+    with patch(
+        "agent.auxiliary_client.resolve_provider_client",
+        return_value=(_mock_client(base_url="https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi/"), "google/gemini-3.8-flash"),
+    ):
+        assert agent._try_activate_fallback(FailoverReason.rate_limit) is True
+    assert agent.model == "google/gemini-3.8-flash"
