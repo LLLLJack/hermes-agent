@@ -1115,9 +1115,18 @@ class WeixinAdapter(OwnAccessPolicyMixin, BasePlatformAdapter):
     async def send_video(self, chat_id: str, video_path: str, caption: Optional[str] = None, reply_to=None, metadata=None) -> SendResult:
         return await self._send_file_result(chat_id, video_path, caption or "", "send_video")
 
-    async def send_voice(self, chat_id: str, audio_path: str, caption: Optional[str] = None, reply_to=None, metadata=None) -> SendResult:
-        # Native outbound voice bubbles are not proven-working upstream; a file attachment at least plays (even .silk).
-        return await self._send_file_result(chat_id, audio_path, caption or "[voice message as attachment]", "send_voice", force_file_attachment=True)
+    async def send_voice(
+        self, chat_id: str, audio_path: str, caption: Optional[str] = None,
+        reply_to=None, metadata=None, *, is_voice: bool = False, **kwargs,
+    ) -> SendResult:
+        # The shared media-delivery path always forwards the message-level is_voice flag.
+        # Weixin currently sends audio as a file attachment (native outbound voice bubbles
+        # are not proven-working upstream), so accept the flag for interface compatibility
+        # while deliberately keeping the attachment behavior unchanged.
+        return await self._send_file_result(
+            chat_id, audio_path, caption or "[voice message as attachment]",
+            "send_voice", force_file_attachment=True,
+        )
 
     async def _download_remote_media(self, url: str) -> str:
         from tools.url_safety import is_safe_url

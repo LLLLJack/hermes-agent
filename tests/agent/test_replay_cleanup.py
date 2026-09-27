@@ -219,3 +219,85 @@ def test_untrustworthy_confirmation_stamp_fails_closed():
         out = canonicalize_replay_history(row, now=10_000.0)
         assert "EXPIRED" in out[0]["content"] and "api_content" not in out[0], untrusted
     assert canonicalize_replay_history([{"role": "user", "content": "confirm reboot"}], now=1e9)[0]["content"] == "confirm reboot"
+
+
+def test_guardrail_halted_identical_loop_is_omitted_from_replay():
+    history = [{"role": "user", "content": "edit V3"}]
+    for i in range(5):
+        history += [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": f"c{i}",
+                    "type": "function",
+                    "function": {"name": "terminal", "arguments": '{"command":"python3 build_v2.py"}'},
+                }],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": f"c{i}",
+                "content": (
+                    '{"output":"PDF generated","exit_code":0}'
+                    + ("\n\n[hermes note: repeated call]" if i >= 2 else "")
+                ),
+            },
+        ]
+    history.append({
+        "role": "assistant",
+        "content": (
+            "I stopped retrying terminal because it hit the tool-call guardrail "
+            "(identical_call_streak_halt) after 5 repeated non-progressing attempts."
+        ),
+        "api_content": "stale exact bytes that must not survive the replay rewrite",
+    })
+    history.append({"role": "user", "content": "search Pip and Posy"})
+
+    frozen = copy.deepcopy(history)
+    out = canonicalize_replay_history(history, now=10_000.0)
+
+    assert history == frozen
+    assert [m["role"] for m in out] == ["user", "assistant", "user"]
+    assert "Replay recovery" in out[1]["content"]
+    assert "terminal" in out[1]["content"]
+    assert "do not resume" in out[1]["content"].lower()
+    assert "api_content" not in out[1]
+    assert out[-1]["content"] == "search Pip and Posy"
+
+
+def test_guardrail_replay_collapse_preserves_nonidentical_progress_before_loop():
+    progress = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{
+            "id": "p",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": '{"path":"v3.py"}'},
+        }],
+    }
+    progress_result = {"role": "tool", "tool_call_id": "p", "content": "source loaded"}
+    history = [{"role": "user", "content": "edit V3"}, progress, progress_result]
+    for i in range(3):
+        history += [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{
+                    "id": f"c{i}",
+                    "type": "function",
+                    "function": {"name": "terminal", "arguments": '{"command":"python3 build_v2.py"}'},
+                }],
+            },
+            {"role": "tool", "tool_call_id": f"c{i}", "content": "same"},
+        ]
+    history.append({
+        "role": "assistant",
+        "content": (
+            "I stopped retrying terminal because it hit the tool-call guardrail "
+            "(identical_call_streak_halt) after 3 repeated non-progressing attempts."
+        ),
+    })
+    out = canonicalize_replay_history(history, now=10_000.0)
+    assert progress in out and progress_result in out
+    assert sum(1 for m in out if m.get("role") == "tool") == 1
+    assert "Replay recovery" in out[-1]["content"]

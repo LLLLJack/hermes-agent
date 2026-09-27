@@ -151,6 +151,111 @@ def sanitize_replay_history(agent_history: List[Dict[str, Any]]) -> List[Dict[st
     return strip_dangling_tool_call_tail(strip_interrupted_tool_tails(agent_history))
 
 
+_GUARDRAIL_HALT_MARKERS = ("identical_call_streak_halt", "identical_cycle_halt")
+
+
+def _guardrail_call_signature(message: Dict[str, Any]) -> Optional[tuple]:
+    """Stable signature for a one-call assistant tool turn, ignoring transport ids."""
+    if not isinstance(message, dict) or message.get("role") != "assistant":
+        return None
+    calls = message.get("tool_calls") or []
+    if len(calls) != 1 or not isinstance(calls[0], dict):
+        return None
+    fn = calls[0].get("function") or {}
+    name = str(fn.get("name") or "").strip()
+    if not name:
+        return None
+    raw_args = fn.get("arguments", "")
+    try:
+        parsed = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+        args = json.dumps(parsed, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        args = str(raw_args)
+    return name, args
+
+
+def _guardrail_result_signature(message: Dict[str, Any]) -> Optional[str]:
+    """Normalize a tool result for loop comparison, stripping Hermes loop annotations."""
+    if not isinstance(message, dict) or message.get("role") != "tool":
+        return None
+    value = message.get("content")
+    if not isinstance(value, str):
+        return None
+    for marker in ("\n\n[hermes note:", "\n\n[Tool loop warning:", "\n\n[Tool loop hard stop:"):
+        value = value.split(marker, 1)[0]
+    return value
+
+
+def collapse_guardrail_halted_tool_loops(agent_history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Omit repeated no-progress tool-call/result tails from model replay after a hard stop.
+
+    The durable transcript remains untouched. A guardrail halt already proves the repeated
+    tail made no progress; replaying copies on the next user turn strongly biases models
+    to resume the stale action. Only the exact repeated tail immediately preceding Hermes'
+    controlled halt message is removed; unrelated tool history is preserved.
+    """
+    if not agent_history:
+        return agent_history
+    drop: set[int] = set()
+    replacements: Dict[int, Dict[str, Any]] = {}
+    for i, msg in enumerate(agent_history):
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str) or not all(
+            token in content for token in ("I stopped retrying", "tool-call guardrail")
+        ):
+            continue
+        if not any(marker in content for marker in _GUARDRAIL_HALT_MARKERS):
+            continue
+
+        cursor = i - 1
+        expected = None
+        pairs: list[tuple[int, int]] = []
+        while cursor >= 1:
+            result_msg = agent_history[cursor]
+            call_msg = agent_history[cursor - 1]
+            call_sig = _guardrail_call_signature(call_msg)
+            result_sig = _guardrail_result_signature(result_msg)
+            if call_sig is None or result_sig is None:
+                break
+            pair_sig = (call_sig, result_sig)
+            if expected is None:
+                expected = pair_sig
+            elif pair_sig != expected:
+                break
+            pairs.append((cursor - 1, cursor))
+            cursor -= 2
+
+        if len(pairs) < 3:
+            continue
+
+        for a, b in pairs:
+            drop.update((a, b))
+        tool_name = expected[0][0] if expected else "tool"
+        replacement = dict(msg)
+        replacement["content"] = (
+            f"[Replay recovery: the previous turn was halted after {len(pairs)} repeated "
+            f"identical {tool_name} calls made no progress. Those repeated tool-call/result "
+            "pairs are intentionally omitted from model replay. Do not resume that stale loop; "
+            "follow the latest user request and choose a different strategy.]"
+        )
+        drop_stale_api_content(replacement)
+        replacements[i] = replacement
+        logger.info(
+            "Collapsed %d repeated %s tool-call/result pair(s) before guardrail halt for replay",
+            len(pairs), tool_name,
+        )
+
+    if not drop and not replacements:
+        return agent_history
+    return [
+        replacements.get(i, msg)
+        for i, msg in enumerate(agent_history)
+        if i not in drop
+    ]
+
+
 def canonicalize_replay_history(
     agent_history: List[Dict[str, Any]], *, now: Optional[float] = None
 ) -> List[Dict[str, Any]]:
@@ -168,6 +273,7 @@ def canonicalize_replay_history(
         now = time.time()
     cleaned = strip_interrupted_tool_tails(agent_history)
     cleaned = strip_dangling_tool_call_tail(cleaned)
+    cleaned = collapse_guardrail_halted_tool_loops(cleaned)
     return strip_stale_dangerous_confirmations(cleaned, now=now)
 
 

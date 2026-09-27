@@ -550,6 +550,28 @@ class TestWeixinVoiceSending:
         assert voice_item["bits_per_sample"] == 16
 
 
+    @patch.object(WeixinAdapter, "_send_file_result", new_callable=AsyncMock)
+    def test_send_voice_accepts_shared_is_voice_kwarg(self, send_file_mock):
+        adapter = self._connected_adapter()
+        send_file_mock.return_value = weixin.SendResult(success=True, message_id="voice-file")
+
+        result = asyncio.run(
+            adapter.send_voice(
+                chat_id="wxid_test123",
+                audio_path="/tmp/story.wav",
+                caption="listen",
+                metadata={"thread_id": "t1"},
+                is_voice=False,
+            )
+        )
+
+        assert result.success is True
+        send_file_mock.assert_awaited_once_with(
+            "wxid_test123", "/tmp/story.wav", "listen",
+            "send_voice", force_file_attachment=True,
+        )
+
+
 class TestIsStaleSessionRet:
     """Regression test for #17228: distinguish stale-session ret=-2 from rate-limit ret=-2."""
 
