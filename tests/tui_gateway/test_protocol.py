@@ -1126,6 +1126,44 @@ def test_slash_exec_rejects_skill_commands(server):
     assert "skill command" in resp["error"]["message"]
 
 
+def test_command_dispatch_expands_stacked_skill_commands(server):
+    sid = "stacked-skill-session"
+    server._sessions[sid] = {"session_key": sid, "agent": None}
+    fake_skills = {
+        "/writer": {"name": "writer", "description": "Draft"},
+        "/research": {"name": "research", "description": "Research"},
+    }
+
+    with (
+        patch("agent.skill_commands.scan_skill_commands", return_value=fake_skills),
+        patch(
+            "agent.skill_commands.split_stacked_skill_commands",
+            return_value=(["/research"], "finish the report"),
+        ) as split,
+        patch(
+            "agent.skill_commands.build_stacked_skill_invocation_message",
+            return_value=("STACKED", ["writer", "research"], []),
+        ) as stacked,
+        patch("agent.skill_commands.build_skill_invocation_message") as single,
+    ):
+        resp = server.handle_request({
+            "id": "r-stacked",
+            "method": "command.dispatch",
+            "params": {
+                "name": "writer",
+                "arg": "/research finish the report",
+                "session_id": sid,
+            },
+        })
+
+    assert resp["result"]["type"] == "skill"
+    assert resp["result"]["message"] == "STACKED"
+    split.assert_called_once_with("/research finish the report")
+    stacked.assert_called_once_with(
+        ["/writer", "/research"], "finish the report", task_id=sid)
+    single.assert_not_called()
+
+
 def test_slash_exec_scopes_skill_lookup_to_session_profile(server, tmp_path):
     """slash.exec must resolve get_skill_commands() against the session's own
     profile_home rather than the gateway process's ambient HERMES_HOME

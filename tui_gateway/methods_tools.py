@@ -573,7 +573,17 @@ def _dispatch_skill(rid, params, session, name, arg):
         sc = _tools_mod("agent.skill_commands")
         cmds, key = sc.scan_skill_commands(), f"/{name}"
         if key in cmds:
-            msg = sc.build_skill_invocation_message(key, arg, task_id=session.get("session_key", "") if session else "")
+            task_id = session.get("session_key", "") if session else ""
+            extra_keys, user_instruction = sc.split_stacked_skill_commands(arg)
+            if extra_keys:
+                stacked = sc.build_stacked_skill_invocation_message(
+                    [key, *extra_keys], user_instruction, task_id=task_id)
+                if stacked:
+                    msg, _loaded_names, _missing = stacked
+                    return _ok(rid, {
+                        "type": "skill", "message": msg, "name": cmds[key].get("name", name),
+                        "display": _skill_scaffold_projection(msg)})
+            msg = sc.build_skill_invocation_message(key, arg, task_id=task_id)
             if msg:  # UIs render `display`, never `message`.
                 return _ok(rid, {
                     "type": "skill", "message": msg, "name": cmds[key].get("name", name),
