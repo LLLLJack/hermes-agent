@@ -2760,6 +2760,8 @@ class TestHandleMaxIterations:
     def test_api_failure_returns_error(self, agent):
         agent.client.chat.completions.create.side_effect = Exception("API down")
         agent._cached_system_prompt = "You are helpful."
+        agent._fallback_chain = []
+        agent._fallback_index = 0
         messages = [{"role": "user", "content": "do stuff"}]
         with patch("agent.relay_llm.complete_logical_call") as complete_logical:
             result = agent._handle_max_iterations(messages, 60)
@@ -2768,6 +2770,50 @@ class TestHandleMaxIterations:
         assert "API down" in result
         complete_logical.assert_called_once()
         assert complete_logical.call_args.kwargs == {"outcome": "failed"}
+
+    def test_api_failure_uses_provider_fallback_for_final_summary(self, agent):
+        """A max-iteration summary transport failure is side-effect free and may
+        safely finish on the configured fallback provider instead of aborting."""
+        primary_client = agent.client
+        primary_client.chat.completions.create.side_effect = TimeoutError("primary summary timed out")
+        fallback_client = MagicMock()
+        fallback_client.chat.completions.create.return_value = _mock_response(
+            content="Recovered final summary."
+        )
+        agent._cached_system_prompt = "You are helpful."
+        agent._fallback_chain = [{"provider": "openai", "model": "gpt-4o-mini"}]
+        agent._fallback_index = 0
+
+        def activate_fallback(*_args, **_kwargs):
+            agent._fallback_index = 1
+            agent.provider = "openai"
+            agent.model = "gpt-4o-mini"
+            agent.base_url = "https://api.openai.com/v1"
+            agent.api_mode = "chat_completions"
+            agent.client = fallback_client
+            return True
+
+        messages = [{"role": "user", "content": "do stuff"}]
+        with (
+            patch.object(
+                agent, "_ensure_primary_openai_client",
+                side_effect=lambda **_kwargs: agent.client,
+            ),
+            patch.object(
+                agent, "_try_activate_fallback",
+                side_effect=activate_fallback,
+            ) as activate,
+            patch("agent.relay_llm.complete_logical_call") as complete_logical,
+        ):
+            result = agent._handle_max_iterations(messages, 60)
+
+        assert result == "Recovered final summary."
+        activate.assert_called_once()
+        fallback_client.chat.completions.create.assert_called_once()
+        assert messages[-1]["role"] == "assistant"
+        assert messages[-1]["content"] == "Recovered final summary."
+        complete_logical.assert_called_once()
+        assert complete_logical.call_args.kwargs == {"outcome": "success"}
 
     def test_summary_skips_reasoning_for_unsupported_openrouter_model(self, agent):
         agent.base_url = "https://openrouter.ai/api/v1"

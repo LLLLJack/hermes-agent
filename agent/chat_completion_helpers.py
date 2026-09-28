@@ -2146,7 +2146,13 @@ _SUMMARY_ATTEMPT_BUILDERS = {"codex_responses": _codex_summary_attempt, "anthrop
 
 
 def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
-    """Request a summary when max iterations are reached. Returns the final response text."""
+    """Request a final summary when max iterations are reached.
+
+    The ordinary turn loop is already over here, so no further caller tool is ever
+    executed.  A transport/provider failure during this last summary must still walk
+    the configured provider fallback chain instead of turning a recoverable backend
+    outage into a terminal user-visible failure.
+    """
     warning = f"⚠️  Reached maximum iterations ({agent.max_iterations}). Requesting summary..."
     if getattr(agent, "suppress_status_output", False):
         # Strict machine-readable mode (-Q, oneshot): keep diagnostics off stdout. quiet_mode is
@@ -2163,30 +2169,67 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     # Shared constant so compaction recognizers can identify this runtime nudge by its stable
     # content after SessionDB projection strips metadata flags.
     from agent.context_compressor import MAX_ITERATIONS_SUMMARY_REQUEST
-    append_message(messages, {"role": "user", "content": MAX_ITERATIONS_SUMMARY_REQUEST})
+    nudge = append_message(messages, {"role": "user", "content": MAX_ITERATIONS_SUMMARY_REQUEST})
 
+    final_response = _EMPTY_SUMMARY_RESPONSE
+    last_error = None
     try:
-        api_messages = _iteration_summary_api_messages(agent, messages)
-        build_attempt = _SUMMARY_ATTEMPT_BUILDERS.get(agent.api_mode, _chat_summary_attempt)
-        attempt = build_attempt(agent, api_messages, summary_api_request_id)
+        while True:
+            try:
+                # Rebuild for every provider: fallback activation can change api_mode,
+                # strict-message sanitization, context limits, client and reasoning policy.
+                api_messages = _iteration_summary_api_messages(agent, messages)
+                build_attempt = _SUMMARY_ATTEMPT_BUILDERS.get(agent.api_mode, _chat_summary_attempt)
+                attempt = build_attempt(agent, api_messages, summary_api_request_id)
 
-        # One retry on an empty summary; a summary empty once its <think> block is stripped is NOT retried.
-        final_response = _EMPTY_SUMMARY_RESPONSE
-        for retry_count in (0, 1):
-            text = attempt(retry_count)
-            if not text:
-                continue
-            if "<think>" in text:
-                text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL).strip()
-            if text:
-                summary_call_outcome = "success"
-                append_message(messages, {"role": "assistant", "content": text})
-                final_response = text
-            break
+                route_text = ""
+                for retry_count in (0, 1):
+                    text = attempt(retry_count)
+                    if not text:
+                        continue
+                    if "<think>" in text:
+                        text = re.sub(r'<think>.*?</think>\s*', '', text, flags=re.DOTALL).strip()
+                    if text:
+                        route_text = text
+                    break
+                if route_text:
+                    summary_call_outcome = "success"
+                    append_message(messages, {"role": "assistant", "content": route_text})
+                    final_response = route_text
+                    break
+                last_error = RuntimeError("iteration summary returned no usable text")
+                logger.warning(
+                    "Iteration summary returned no usable text from %s/%s",
+                    getattr(agent, "provider", ""), getattr(agent, "model", ""),
+                )
+            except InterruptedError:
+                # A real user cancellation must not be converted into a provider
+                # failover that keeps the turn alive.
+                summary_call_outcome = "cancelled"
+                if messages and messages[-1] is nudge:
+                    messages.pop()
+                raise
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "Failed to get iteration summary from %s/%s: %s",
+                    getattr(agent, "provider", ""), getattr(agent, "model", ""), e,
+                )
 
-    except Exception as e:
-        logger.warning("Failed to get summary response: %s", e)
-        final_response = f"I reached the maximum iterations ({agent.max_iterations}) but couldn't summarize. Error: {str(e)}"
+            # Summary/finalization is side-effect free: unlike a tool-loop guardrail,
+            # switching provider here cannot replay a caller action.  The fallback
+            # helper also skips a chain entry resolving to the backend that just failed.
+            if not agent._has_pending_fallback() or not agent._try_activate_fallback():
+                if last_error and str(last_error) != "iteration summary returned no usable text":
+                    final_response = (
+                        f"I reached the maximum iterations ({agent.max_iterations}) but couldn't summarize. "
+                        f"Error: {str(last_error)}"
+                    )
+                break
+            logger.info(
+                "Retrying max-iteration summary on fallback %s/%s",
+                getattr(agent, "provider", ""), getattr(agent, "model", ""),
+            )
     finally:
         from agent import relay_llm
         relay_llm.complete_logical_call(summary_api_request_id, outcome=summary_call_outcome)
