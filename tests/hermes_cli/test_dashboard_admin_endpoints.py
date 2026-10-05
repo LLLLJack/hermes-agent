@@ -152,6 +152,42 @@ class TestCredentialPoolEndpoints:
 
 
 
+    def test_configured_custom_key_env_provider_is_discovered_without_existing_pool_row(
+        self, _isolate_hermes_home
+    ):
+        from hermes_constants import get_hermes_home
+        from hermes_cli.config import save_env_value
+
+        home = get_hermes_home()
+        (home / "config.yaml").write_text(
+            "custom_providers:\n"
+            "  - name: SenseNova\n"
+            "    base_url: https://token.sensenova.cn/v1\n"
+            "    key_env: SENSENOVA_API_KEY\n"
+            "    models:\n"
+            "      - deepseek-v4-flash\n"
+        )
+        save_env_value("SENSENOVA_API_KEY", "test-dashboard-sensenova-key-12345")
+
+        auth_path = home / "auth.json"
+        if auth_path.exists():
+            import json
+            raw = json.loads(auth_path.read_text())
+            assert "custom:sensenova" not in (raw.get("credential_pool") or {})
+
+        r = self.client.get("/api/credentials/pool")
+        assert r.status_code == 200
+        providers = {item["provider"]: item for item in r.json()["providers"]}
+        assert "custom:sensenova" in providers
+        entries = providers["custom:sensenova"]["entries"]
+        assert len(entries) == 1
+        assert entries[0]["source"] == "env:SENSENOVA_API_KEY"
+        assert entries[0]["token_preview"]
+
+        assert "test-dashboard-sensenova-key-12345" not in r.text
+        assert "test-dashboard-sensenova-key-12345" not in auth_path.read_text()
+
+
     def test_env_seeded_delete_stays_deleted(self):
         """#55217: DELETE must suppress the source or load_pool() resurrects it.
 

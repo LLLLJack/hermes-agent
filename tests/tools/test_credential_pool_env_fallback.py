@@ -112,6 +112,105 @@ class TestCredentialPoolSeedsFromDotEnv:
         assert seeded[0].access_token == "sk-dotenv-fresh"
 
 
+class TestCustomProviderKeyEnvPool:
+    """Custom provider key_env/api_key_env participates in credential-pool discovery."""
+
+    @staticmethod
+    def _allow_isolated_auth(home, monkeypatch):
+        # The shared fixture intentionally maps Path.home() to the same tmp
+        # root as HERMES_HOME. load_pool() has a pytest seat belt that treats
+        # exactly <Path.home()>/.hermes/auth.json as a real-user store, so give
+        # that safety comparison a distinct fake home while HERMES_HOME remains
+        # the test's isolated directory.
+        monkeypatch.setattr(Path, "home", lambda: home.parent / "pytest-fake-home")
+
+    @staticmethod
+    def _config(*, key_field="key_env", key_name="SENSENOVA_API_KEY", inline_key=None):
+        entry = {
+            "name": "SenseNova",
+            "base_url": "https://token.sensenova.cn/v1",
+            key_field: key_name,
+            "models": ["deepseek-v4-flash"],
+        }
+        if inline_key is not None:
+            entry["api_key"] = inline_key
+        return {"custom_providers": [entry]}
+
+    def test_key_env_from_dotenv_seeds_reference_only_pool(
+        self, isolated_hermes_home, monkeypatch
+    ):
+        self._allow_isolated_auth(isolated_hermes_home, monkeypatch)
+        secret = "test-sensenova-env-secret-12345"
+        _write_env_file(isolated_hermes_home, SENSENOVA_API_KEY=secret)
+
+        import json
+        import agent.credential_pool as cp
+
+        monkeypatch.setattr(cp, "_load_config_safe", lambda: self._config())
+        pool = cp.load_pool("custom:sensenova")
+        entries = pool.entries()
+
+        assert len(entries) == 1
+        assert entries[0].source == "env:SENSENOVA_API_KEY"
+        assert entries[0].access_token == secret
+        assert entries[0].base_url == "https://token.sensenova.cn/v1"
+
+        raw = json.loads((isolated_hermes_home / "auth.json").read_text())
+        row = raw["credential_pool"]["custom:sensenova"][0]
+        assert row["source"] == "env:SENSENOVA_API_KEY"
+        assert "access_token" not in row
+        assert row.get("secret_fingerprint", "").startswith("sha256:")
+        assert secret not in (isolated_hermes_home / "auth.json").read_text()
+
+        again = cp.load_pool("custom:sensenova").entries()
+        assert len(again) == 1
+        assert again[0].access_token == secret
+
+    def test_api_key_env_alias_is_supported(self, isolated_hermes_home, monkeypatch):
+        self._allow_isolated_auth(isolated_hermes_home, monkeypatch)
+        _write_env_file(isolated_hermes_home, SENSENOVA_ALIAS_KEY="test-alias-secret-12345")
+
+        import agent.credential_pool as cp
+
+        monkeypatch.setattr(
+            cp,
+            "_load_config_safe",
+            lambda: self._config(
+                key_field="api_key_env",
+                key_name="SENSENOVA_ALIAS_KEY",
+            ),
+        )
+        entries = cp.load_pool("custom:sensenova").entries()
+        assert len(entries) == 1
+        assert entries[0].source == "env:SENSENOVA_ALIAS_KEY"
+        assert entries[0].access_token == "test-alias-secret-12345"
+
+    def test_missing_key_env_falls_back_to_inline_key(
+        self, isolated_hermes_home, monkeypatch
+    ):
+        self._allow_isolated_auth(isolated_hermes_home, monkeypatch)
+        import agent.credential_pool as cp
+
+        monkeypatch.setattr(
+            cp,
+            "_load_config_safe",
+            lambda: self._config(inline_key="test-inline-secret-12345"),
+        )
+        entries = cp.load_pool("custom:sensenova").entries()
+        assert len(entries) == 1
+        assert entries[0].source == "config:SenseNova"
+        assert entries[0].access_token == "test-inline-secret-12345"
+
+    def test_missing_key_env_and_no_inline_key_stays_empty(
+        self, isolated_hermes_home, monkeypatch
+    ):
+        self._allow_isolated_auth(isolated_hermes_home, monkeypatch)
+        import agent.credential_pool as cp
+
+        monkeypatch.setattr(cp, "_load_config_safe", lambda: self._config())
+        assert cp.load_pool("custom:sensenova").entries() == []
+
+
 class TestAuthResolvesFromDotEnv:
     """_resolve_api_key_provider_secret must also read from ~/.hermes/.env."""
 

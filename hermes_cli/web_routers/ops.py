@@ -306,10 +306,38 @@ async def list_credential_pool():
     from hermes_cli.auth import read_credential_pool
 
     def _run():
+        from agent.credential_pool import get_custom_provider_pool_key
+        from hermes_cli.config import get_compatible_custom_providers
+
         providers = []
-        # read_credential_pool(None) lists every provider with pooled entries;
-        # load_pool() gives the rich PooledCredential objects per provider.
-        for provider_id in sorted(read_credential_pool().keys()):
+        provider_ids = set(read_credential_pool().keys())
+
+        # A configured custom provider may rely only on ``key_env`` and have no
+        # auth.json row yet. Include its preferred pool key so load_pool() gets
+        # a chance to seed the credential and the Dashboard does not hide a
+        # valid configured provider merely because the persisted pool is empty.
+        try:
+            config = load_config()
+            for entry in get_compatible_custom_providers(config):
+                if not isinstance(entry, dict):
+                    continue
+                name = str(entry.get("name") or "").strip()
+                base_url = str(entry.get("base_url") or entry.get("api") or entry.get("url") or "").strip()
+                if not name or not base_url:
+                    continue
+                pool_key = get_custom_provider_pool_key(
+                    base_url,
+                    str(entry.get("provider_key") or name).strip() or name,
+                )
+                if pool_key:
+                    provider_ids.add(pool_key)
+        except Exception:
+            _log.exception("configured custom provider discovery failed (non-fatal)")
+
+        # read_credential_pool(None) contributes every persisted provider;
+        # configured custom providers above contribute seedable-but-not-yet-
+        # persisted pools. load_pool() gives rich PooledCredential objects.
+        for provider_id in sorted(provider_ids):
             try:
                 pool = load_pool(provider_id)
             except Exception:

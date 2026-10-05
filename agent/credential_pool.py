@@ -2641,13 +2641,28 @@ def _seed_custom_pool(pool_key: str, entries: List[PooledCredential]) -> Tuple[b
 
     cp_config = _get_custom_provider_config(pool_key)
     if cp_config:
-        api_key = str(cp_config.get("api_key") or "").strip()
         name = str(cp_config.get("name") or "").strip()
-        if api_key:
+        base_url = _norm_url(cp_config.get("base_url"))
+        key_env = str(cp_config.get("key_env") or cp_config.get("api_key_env") or "").strip()
+        env_api_key = get_env_prefer_dotenv(key_env) if key_env else ""
+        inline_api_key = str(cp_config.get("api_key") or "").strip()
+
+        # Custom providers have long supported ``key_env`` at runtime, but the
+        # credential-pool seeder only handled inline ``api_key``. Once an old
+        # pool row disappeared, Dashboard/runtime pool discovery could no
+        # longer recover an otherwise valid ~/.hermes/.env key. Mirror the
+        # named-custom runtime contract here: key_env wins when it resolves,
+        # otherwise fall back to the inline key.
+        if env_api_key:
+            seed.upsert(
+                f"env:{key_env}",
+                _env_payload(env_var=key_env, token=env_api_key, base_url=base_url),
+            )
+        elif inline_api_key:
             seed.upsert(f"config:{name}", {
                 "auth_type": AUTH_TYPE_API_KEY,
-                "access_token": api_key,
-                "base_url": _norm_url(cp_config.get("base_url")),
+                "access_token": inline_api_key,
+                "base_url": base_url,
                 "label": name or f"config:{name}",
             })
 
