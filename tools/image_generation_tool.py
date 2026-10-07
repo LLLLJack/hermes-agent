@@ -596,10 +596,18 @@ def _provider_result(result, contract_error: str) -> str:
     return json.dumps(result)
 
 
-def _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale, model=None) -> Dict[str, Any]:
-    """Add the optional ``provider.generate(**kwargs)`` args in place (edit args only when supplied)."""
+def _add_provider_kwargs(
+    kwargs, image_url, reference_image_urls, upscale, model=None, image_size=None
+) -> Dict[str, Any]:
+    """Add optional ``provider.generate(**kwargs)`` args in place.
+
+    ``image_size`` is advertised only by providers that declare explicit output-size
+    capabilities; passing it here remains harmless for providers that accept ``**kwargs``.
+    """
     if model:
         kwargs["model"] = model
+    if isinstance(image_size, str) and image_size.strip():
+        kwargs["image_size"] = image_size.strip()
     if isinstance(image_url, str) and image_url.strip():
         kwargs["image_url"] = image_url.strip()
     if reference_image_urls is not None:
@@ -614,7 +622,8 @@ def _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale, model
 
 def _dispatch_to_plugin_provider(
     prompt: str, aspect_ratio: str, image_url: Optional[str] = None,
-    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None):
+    reference_image_urls: Optional[list] = None, upscale: Optional[bool] = None,
+    image_size: Optional[str] = None):
     """JSON result from the selected plugin provider, or ``None`` to fall through to in-tree FAL
     (provider unset / ``"fal"`` / ``"nous"``). Providers without ``upscale`` ignore it via ``**kwargs``."""
     configured = _plugin_provider_name()
@@ -639,8 +648,10 @@ def _dispatch_to_plugin_provider(
     pname = getattr(provider, "name", "?")
     kwargs: Dict[str, Any] = {"prompt": prompt, "aspect_ratio": aspect_ratio}
     try:
-        _add_provider_kwargs(kwargs, image_url, reference_image_urls, upscale,
-                             model=_read_configured_image_model())
+        _add_provider_kwargs(
+            kwargs, image_url, reference_image_urls, upscale,
+            model=_read_configured_image_model(), image_size=image_size,
+        )
         result = provider.generate(**kwargs)
     except Exception as exc:
         # A TypeError from generate() predating image_url support (third-party plugin not yet
@@ -737,6 +748,7 @@ def _handle_image_generate(args, **kw):
         return tool_error("prompt is required for image generation")
     aspect_ratio = args.get("aspect_ratio", DEFAULT_ASPECT_RATIO)
     upscale = args.get("upscale")
+    image_size = args.get("image_size")
     task_id = kw.get("task_id")
     # Confinement chokepoint BEFORE any dispatch: every route receives sandbox-confined bytes.
     image_url, reference_image_urls, confine_error = _confine_source_images(
@@ -747,11 +759,14 @@ def _handle_image_generate(args, **kw):
     # interception (only when no provider is set, so BYO/direct FAL stays untouched), then FAL.
     sources = dict(image_url=image_url, reference_image_urls=reference_image_urls,
                    upscale=upscale if isinstance(upscale, bool) else None)
-    raw = None
-    for route in (_dispatch_to_plugin_provider, _maybe_route_managed_krea, image_generate_tool):
-        raw = route(prompt, aspect_ratio, **sources)
-        if raw is not None:
-            break
+    raw = _dispatch_to_plugin_provider(
+        prompt, aspect_ratio, image_size=image_size if isinstance(image_size, str) else None, **sources
+    )
+    if raw is None:
+        for route in (_maybe_route_managed_krea, image_generate_tool):
+            raw = route(prompt, aspect_ratio, **sources)
+            if raw is not None:
+                break
     return _postprocess_image_generate_result(raw, task_id=task_id)
 
 
@@ -783,8 +798,15 @@ def _active_image_capabilities() -> Dict[str, Any]:
                     info["modalities"] = list(caps["modalities"])
                 if caps.get("max_reference_images"):
                     info["max_reference_images"] = int(caps["max_reference_images"])
-                # Plugins opt in explicitly; absent = no upscale param.
+                # Plugins opt in explicitly; absent = no upscale/size/extended-ratio params.
                 info["supports_upscale"] = bool(caps.get("supports_upscale"))
+                if caps.get("aspect_ratios"):
+                    info["aspect_ratios"] = [str(v) for v in caps["aspect_ratios"]]
+                if caps.get("image_sizes"):
+                    info["image_sizes"] = [str(v) for v in caps["image_sizes"]]
+                    info["default_image_size"] = str(
+                        caps.get("default_image_size") or info["image_sizes"][0]
+                    )
                 return info
         except Exception:  # noqa: BLE001
             pass
@@ -834,8 +856,24 @@ def _build_dynamic_image_schema() -> Dict[str, Any]:
     max_refs = int(info.get("max_reference_images") or 0)
     can_edit = "image" in set(info.get("modalities") or ["text"])
     static_props = IMAGE_GENERATE_SCHEMA["parameters"]["properties"]
-    properties: Dict[str, Any] = {
-        "prompt": static_props["prompt"], "aspect_ratio": static_props["aspect_ratio"]}
+    aspect_prop = dict(static_props["aspect_ratio"])
+    if info.get("aspect_ratios"):
+        ratios = list(info["aspect_ratios"])
+        aspect_prop = {
+            "type": "string",
+            "enum": ratios,
+            "description": "Exact output aspect ratio supported by the active image model.",
+            "default": "16:9" if "16:9" in ratios else ratios[0],
+        }
+    properties: Dict[str, Any] = {"prompt": static_props["prompt"], "aspect_ratio": aspect_prop}
+    if info.get("image_sizes"):
+        sizes = list(info["image_sizes"])
+        properties["image_size"] = {
+            "type": "string",
+            "enum": sizes,
+            "description": "Output image resolution tier supported by the active image model.",
+            "default": str(info.get("default_image_size") or sizes[0]),
+        }
     if can_edit:
         edit_clause = ", or edit / transform an existing image by passing image_url"
         properties["image_url"] = _IMAGE_URL_PARAM

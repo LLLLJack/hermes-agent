@@ -22,7 +22,6 @@ from agent.image_gen_provider import (
     ImageGenProvider,
     error_response,
     normalize_reference_images,
-    resolve_aspect_ratio,
     save_b64_image,
     success_response,
 )
@@ -30,11 +29,49 @@ from agent.vertex_adapter import get_vertex_credentials, has_vertex_credentials
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "gemini-3.1-flash-image"
+DEFAULT_MODEL = "gemini-nano-banana-2.1"
 MAX_REFERENCE_IMAGES = 14
 MAX_SOURCE_BYTES = 25 * 1024 * 1024
 
+_NANO_BANANA_21_ASPECT_RATIOS = (
+    "1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1",
+    "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9",
+)
+_NANO_BANANA_21_IMAGE_SIZES = ("1K", "2K", "4K")
+_ASPECT_ALIASES = {"landscape": "16:9", "square": "1:1", "portrait": "9:16"}
+
+_VERTEX_RESPONSE_ASPECT_ENUM = {
+    "1:1": "ASPECT_RATIO_ONE_BY_ONE",
+    "2:3": "ASPECT_RATIO_TWO_BY_THREE",
+    "3:2": "ASPECT_RATIO_THREE_BY_TWO",
+    "3:4": "ASPECT_RATIO_THREE_BY_FOUR",
+    "4:3": "ASPECT_RATIO_FOUR_BY_THREE",
+    "4:5": "ASPECT_RATIO_FOUR_BY_FIVE",
+    "5:4": "ASPECT_RATIO_FIVE_BY_FOUR",
+    "9:16": "ASPECT_RATIO_NINE_BY_SIXTEEN",
+    "16:9": "ASPECT_RATIO_SIXTEEN_BY_NINE",
+    "21:9": "ASPECT_RATIO_TWENTY_ONE_BY_NINE",
+    "1:8": "ASPECT_RATIO_ONE_BY_EIGHT",
+    "8:1": "ASPECT_RATIO_EIGHT_BY_ONE",
+    "1:4": "ASPECT_RATIO_ONE_BY_FOUR",
+    "4:1": "ASPECT_RATIO_FOUR_BY_ONE",
+}
+_VERTEX_RESPONSE_SIZE_ENUM = {
+    "1K": "IMAGE_SIZE_ONE_K",
+    "2K": "IMAGE_SIZE_TWO_K",
+    "4K": "IMAGE_SIZE_FOUR_K",
+}
+
 _MODELS: Dict[str, Dict[str, Any]] = {
+    "gemini-nano-banana-2.1": {
+        "display": "Gemini Nano Banana 2.1",
+        "speed": "Flash-class",
+        "strengths": "Latest GA image generation/editing; stronger text, consistency, and wide panoramas",
+        "image_size": "1K",
+        "image_sizes": _NANO_BANANA_21_IMAGE_SIZES,
+        "aspect_ratios": _NANO_BANANA_21_ASPECT_RATIOS,
+        "response_format_image": True,
+    },
     "gemini-3-pro-image-preview": {
         "display": "Gemini 3 Pro Image Preview",
         "speed": "~8s",
@@ -61,7 +98,24 @@ _MODELS: Dict[str, Dict[str, Any]] = {
     },
 }
 
-_ASPECT_TO_GEMINI = {"landscape": "16:9", "square": "1:1", "portrait": "9:16"}
+_ASPECT_TO_GEMINI = dict(_ASPECT_ALIASES)
+
+
+def _resolve_aspect_ratio(value: Any, model_meta: Dict[str, Any]) -> str:
+    raw = str(value or "").strip().lower()
+    candidate = _ASPECT_ALIASES.get(raw, raw)
+    supported = tuple(model_meta.get("aspect_ratios") or ())
+    if supported:
+        return candidate if candidate in supported else "16:9"
+    return candidate if candidate in _ASPECT_ALIASES.values() else "16:9"
+
+
+def _resolve_image_size(value: Any, model_meta: Dict[str, Any]) -> str:
+    supported = tuple(str(v).upper() for v in (model_meta.get("image_sizes") or ()))
+    if not supported:
+        return str(model_meta.get("image_size") or "").strip()
+    candidate = str(value or model_meta.get("image_size") or supported[0]).strip().upper()
+    return candidate if candidate in supported else str(model_meta.get("image_size") or supported[0]).upper()
 
 
 def _scoped_env(name: str) -> str:
@@ -192,17 +246,30 @@ def _request_body(
     aspect: str,
     model_meta: Dict[str, Any],
     source_parts: List[Dict[str, Any]],
+    image_size: Any = None,
 ) -> Dict[str, Any]:
-    image_config: Dict[str, Any] = {"aspectRatio": _ASPECT_TO_GEMINI[aspect]}
-    image_size = str(model_meta.get("image_size") or "").strip()
-    if image_size:
-        image_config["imageSize"] = image_size
+    resolved_aspect = _resolve_aspect_ratio(aspect, model_meta)
+    image_config: Dict[str, Any] = {"aspectRatio": resolved_aspect}
+    resolved_size = _resolve_image_size(image_size, model_meta)
+    if resolved_size:
+        image_config["imageSize"] = resolved_size
+    generation_config: Dict[str, Any] = {"responseModalities": ["TEXT", "IMAGE"]}
+    if model_meta.get("response_format_image"):
+        # Vertex v1's current responseFormat.image fields are enum-backed.
+        # Sending the human-readable strings used by legacy imageConfig is
+        # rejected, while staying on imageConfig silently ignores imageSize for
+        # Nano Banana 2.1.
+        response_image: Dict[str, Any] = {
+            "aspectRatio": _VERTEX_RESPONSE_ASPECT_ENUM[resolved_aspect],
+        }
+        if resolved_size:
+            response_image["imageSize"] = _VERTEX_RESPONSE_SIZE_ENUM[resolved_size]
+        generation_config["responseFormat"] = {"image": response_image}
+    else:
+        generation_config["imageConfig"] = image_config
     return {
         "contents": {"role": "USER", "parts": [{"text": prompt}, *source_parts]},
-        "generationConfig": {
-            "responseModalities": ["TEXT", "IMAGE"],
-            "imageConfig": image_config,
-        },
+        "generationConfig": generation_config,
     }
 
 
@@ -265,7 +332,17 @@ class VertexGeminiImageGenProvider(ImageGenProvider):
         return DEFAULT_MODEL
 
     def capabilities(self) -> Dict[str, Any]:
-        return {"modalities": ["text", "image"], "max_reference_images": MAX_REFERENCE_IMAGES}
+        _model, meta = _resolve_model()
+        caps: Dict[str, Any] = {
+            "modalities": ["text", "image"],
+            "max_reference_images": MAX_REFERENCE_IMAGES,
+        }
+        if meta.get("aspect_ratios"):
+            caps["aspect_ratios"] = list(meta["aspect_ratios"])
+        if meta.get("image_sizes"):
+            caps["image_sizes"] = list(meta["image_sizes"])
+            caps["default_image_size"] = str(meta.get("image_size") or meta["image_sizes"][0])
+        return caps
 
     def get_setup_schema(self) -> Dict[str, Any]:
         return {
@@ -291,13 +368,12 @@ class VertexGeminiImageGenProvider(ImageGenProvider):
         **kwargs: Any,
     ) -> Dict[str, Any]:
         prompt = (prompt or "").strip()
-        aspect = resolve_aspect_ratio(aspect_ratio)
         if not prompt:
             return error_response(
                 error="Prompt is required and must be a non-empty string",
                 error_type="invalid_argument",
                 provider=self.name,
-                aspect_ratio=aspect,
+                aspect_ratio=str(aspect_ratio or DEFAULT_ASPECT_RATIO),
             )
 
         sources: List[str] = []
@@ -307,6 +383,8 @@ class VertexGeminiImageGenProvider(ImageGenProvider):
         sources = sources[:MAX_REFERENCE_IMAGES]
         modality = "image" if sources else "text"
         model, model_meta = _resolve_model(kwargs.get("model"))
+        aspect = _resolve_aspect_ratio(aspect_ratio, model_meta)
+        image_size = _resolve_image_size(kwargs.get("image_size"), model_meta)
 
         try:
             runtime = _resolve_runtime()
@@ -318,7 +396,7 @@ class VertexGeminiImageGenProvider(ImageGenProvider):
                 source_parts = [_image_part(reference, client) for reference in sources]
                 response = client.post(
                     f"{runtime['base_url']}/models/{model}:generateContent",
-                    json=_request_body(prompt, aspect, model_meta, source_parts),
+                    json=_request_body(prompt, aspect, model_meta, source_parts, image_size=image_size),
                 )
                 if response.is_error:
                     return error_response(
@@ -356,6 +434,7 @@ class VertexGeminiImageGenProvider(ImageGenProvider):
             modality=modality,
             extra={
                 "source_images": len(sources),
+                "image_size": image_size or None,
                 "project": runtime["project"],
                 "location": runtime["region"],
             },

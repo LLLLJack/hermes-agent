@@ -161,6 +161,35 @@ class TestDynamicParamGating(unittest.TestCase):
         self.assertEqual(sorted(props), ["aspect_ratio", "prompt"])
         self.assertNotIn("upscale", props)
 
+    def test_plugin_can_advertise_extended_ratios_and_output_sizes(self):
+        class _Prov:
+            display_name = "Vertex AI Gemini"
+            def capabilities(self):
+                return {
+                    "modalities": ["text", "image"],
+                    "max_reference_images": 14,
+                    "aspect_ratios": ["1:1", "1:8", "16:9", "21:9"],
+                    "image_sizes": ["1K", "2K", "4K"],
+                    "default_image_size": "1K",
+                }
+            def default_model(self):
+                return "gemini-nano-banana-2.1"
+        with patch.object(ig, "_read_configured_image_provider",
+                          return_value="vertex-gemini"), \
+             patch.object(ig, "_read_configured_image_model",
+                          return_value="gemini-nano-banana-2.1"), \
+             patch("agent.image_gen_registry.get_provider",
+                   return_value=_Prov()), \
+             patch("hermes_cli.plugins._ensure_plugins_discovered"):
+            schema = _build_dynamic_image_schema()
+        props = schema["parameters"]["properties"]
+        self.assertEqual(props["aspect_ratio"]["enum"], ["1:1", "1:8", "16:9", "21:9"])
+        self.assertEqual(props["aspect_ratio"]["default"], "16:9")
+        self.assertEqual(props["image_size"]["enum"], ["1K", "2K", "4K"])
+        self.assertEqual(props["image_size"]["default"], "1K")
+        self.assertIn("image_url", props)
+        self.assertIn("reference_image_urls", props)
+
     def test_static_schema_carries_no_capability_args(self):
         """The registration-time placeholder must stay minimal — dynamic
         overrides own the capability args (do-not-re-add guard)."""

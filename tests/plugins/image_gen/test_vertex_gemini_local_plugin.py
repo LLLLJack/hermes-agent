@@ -27,6 +27,9 @@ def test_provider_declares_image_edit_capabilities(tmp_path: Path):
     assert provider.capabilities() == {
         "modalities": ["text", "image"],
         "max_reference_images": 14,
+        "aspect_ratios": list(module._NANO_BANANA_21_ASPECT_RATIOS),
+        "image_sizes": ["1K", "2K", "4K"],
+        "default_image_size": "1K",
     }
 
     source = tmp_path / "source.png"
@@ -82,3 +85,33 @@ def test_scoped_vertex_model_config_wins_over_top_level(monkeypatch):
     monkeypatch.setattr(module, "_scoped_env", lambda _name: "")
 
     assert module._resolve_model()[0] == "gemini-2.5-flash-image"
+
+
+def test_nano_banana_21_is_default_and_supports_full_output_controls(monkeypatch):
+    module = _load_plugin()
+    monkeypatch.setattr(module, "_load_config", lambda: {})
+    monkeypatch.setattr(module, "_scoped_env", lambda _name: "")
+
+    model, meta = module._resolve_model()
+    assert model == "gemini-nano-banana-2.1"
+    assert tuple(meta["image_sizes"]) == ("1K", "2K", "4K")
+    assert "1:8" in meta["aspect_ratios"]
+    assert "21:9" in meta["aspect_ratios"]
+
+    body = module._request_body("panorama", "1:8", meta, [], image_size="4K")
+    assert body["generationConfig"]["responseFormat"]["image"] == {
+        "aspectRatio": "ASPECT_RATIO_ONE_BY_EIGHT",
+        "imageSize": "IMAGE_SIZE_FOUR_K",
+    }
+    assert "imageConfig" not in body["generationConfig"]
+
+
+def test_nano_banana_21_keeps_legacy_aspect_aliases_and_safe_defaults(monkeypatch):
+    module = _load_plugin()
+    meta = module._MODELS["gemini-nano-banana-2.1"]
+
+    assert module._resolve_aspect_ratio("landscape", meta) == "16:9"
+    assert module._resolve_aspect_ratio("portrait", meta) == "9:16"
+    assert module._resolve_aspect_ratio("not-a-ratio", meta) == "16:9"
+    assert module._resolve_image_size("2k", meta) == "2K"
+    assert module._resolve_image_size("bogus", meta) == "1K"

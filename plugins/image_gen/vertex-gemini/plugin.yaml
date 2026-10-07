@@ -1,6 +1,6 @@
 name: vertex-gemini
-version: 1.0.0
-description: "Local Vertex AI Gemini image generation and multi-reference editing backend."
+version: 1.1.0
+description: "Local Vertex AI Gemini image generation/editing backend with Nano Banana 2.1 output controls."
 author: VPS local
 kind: backend
 requires_env:
