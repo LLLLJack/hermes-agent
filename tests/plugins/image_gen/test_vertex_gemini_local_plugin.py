@@ -29,7 +29,7 @@ def test_provider_declares_image_edit_capabilities(tmp_path: Path):
         "max_reference_images": 14,
         "aspect_ratios": list(module._NANO_BANANA_21_ASPECT_RATIOS),
         "image_sizes": ["1K", "2K", "4K"],
-        "default_image_size": "1K",
+        "default_image_size": "2K",
     }
 
     source = tmp_path / "source.png"
@@ -99,7 +99,7 @@ def test_nano_banana_21_is_default_and_supports_full_output_controls(monkeypatch
     assert "21:9" in meta["aspect_ratios"]
 
     body = module._request_body("panorama", "1:8", meta, [], image_size="4K")
-    assert body["generationConfig"]["responseFormat"]["image"] == {
+    assert body["generationConfig"]["responseFormat"][0]["image"] == {
         "aspectRatio": "ASPECT_RATIO_ONE_BY_EIGHT",
         "imageSize": "IMAGE_SIZE_FOUR_K",
     }
@@ -114,4 +114,26 @@ def test_nano_banana_21_keeps_legacy_aspect_aliases_and_safe_defaults(monkeypatc
     assert module._resolve_aspect_ratio("portrait", meta) == "9:16"
     assert module._resolve_aspect_ratio("not-a-ratio", meta) == "16:9"
     assert module._resolve_image_size("2k", meta) == "2K"
-    assert module._resolve_image_size("bogus", meta) == "1K"
+    assert module._resolve_image_size("bogus", meta) == "2K"
+
+
+def test_parse_image_skips_internal_thought_image():
+    module = _load_plugin()
+    payload = {
+        "candidates": [{
+            "content": {
+                "parts": [
+                    {
+                        "thought": True,
+                        "inlineData": {"mimeType": "image/png", "data": "dGhvdWdodA=="},
+                    },
+                    {
+                        "inlineData": {"mimeType": "image/png", "data": "ZmluYWw="},
+                    },
+                ]
+            }
+        }]
+    }
+    data, extension = module._parse_image(payload)
+    assert data == "ZmluYWw="
+    assert extension == "png"

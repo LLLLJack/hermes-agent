@@ -67,7 +67,7 @@ _MODELS: Dict[str, Dict[str, Any]] = {
         "display": "Gemini Nano Banana 2.1",
         "speed": "Flash-class",
         "strengths": "Latest GA image generation/editing; stronger text, consistency, and wide panoramas",
-        "image_size": "1K",
+        "image_size": "2K",
         "image_sizes": _NANO_BANANA_21_IMAGE_SIZES,
         "aspect_ratios": _NANO_BANANA_21_ASPECT_RATIOS,
         "response_format_image": True,
@@ -264,7 +264,7 @@ def _request_body(
         }
         if resolved_size:
             response_image["imageSize"] = _VERTEX_RESPONSE_SIZE_ENUM[resolved_size]
-        generation_config["responseFormat"] = {"image": response_image}
+        generation_config["responseFormat"] = [{"image": response_image}]
     else:
         generation_config["imageConfig"] = image_config
     return {
@@ -292,6 +292,11 @@ def _parse_image(payload: Dict[str, Any]) -> Tuple[str, str]:
         content = candidate.get("content") or {}
         for part in content.get("parts") or []:
             if not isinstance(part, dict):
+                continue
+            # Nano Banana 2.1 may emit an internal image-bearing thought part
+            # before the user-visible final image. Never surface/save reasoning
+            # artifacts as the generated result.
+            if part.get("thought") is True:
                 continue
             inline = part.get("inlineData") or part.get("inline_data")
             if not isinstance(inline, dict):
