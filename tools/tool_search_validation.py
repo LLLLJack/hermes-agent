@@ -71,6 +71,37 @@ def _validation_error(message: str, *, path: str, constraint: str, parameters: A
         hint="Retry tool_call with 'arguments' matching the parameters schema above.")
 
 
+def _effective_registry_schema(name: str) -> Any:
+    """Return the same runtime schema a model sees for a registered tool.
+
+    Deferred tools are validated locally because the provider only sees the
+    generic tool_call arguments object. Dynamic schema overrides therefore
+    must be applied here too; otherwise tool_describe can advertise values
+    that tool_call immediately rejects against the stale static schema.
+    """
+    from tools.registry import registry as _registry
+
+    schema = _registry.get_schema(name)
+    if not isinstance(schema, dict):
+        return schema
+    entry = _registry.get_entry(name)
+    dynamic = getattr(entry, "dynamic_schema_overrides", None) if entry is not None else None
+    if dynamic is None:
+        return schema
+    try:
+        overrides = dynamic()
+    except Exception:
+        logger.warning(
+            "dynamic_schema_overrides for deferred validation of %s raised; using static schema",
+            name,
+            exc_info=True,
+        )
+        return schema
+    if not isinstance(overrides, dict):
+        return schema
+    return {**schema, **overrides}
+
+
 def validate_deferred_call_args(name: str, args: Dict[str, Any]) -> Optional[str]:
     """Validate ``tool_call`` arguments against the deferred tool's schema. Models invoke
     deferred tools "blind" (schema unseen) and omit required args; without this, the opaque
@@ -83,8 +114,7 @@ def validate_deferred_call_args(name: str, args: Dict[str, Any]) -> Optional[str
     ``arguments: object`` bridge. See #5149.
     """
     try:
-        from tools.registry import registry as _registry
-        schema = _registry.get_schema(name)
+        schema = _effective_registry_schema(name)
         if not isinstance(schema, dict):
             return None
         fn = schema.get("function") if schema.get("type") == "function" else schema

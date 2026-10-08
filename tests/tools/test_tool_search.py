@@ -826,6 +826,65 @@ class TestDeferredCallSchemaProbe:
         assert result.get("ok") is True
         assert result.get("doc") == "abc"
 
+    def test_dynamic_schema_enum_matches_tool_describe_and_deferred_validation(self):
+        from tools.registry import registry
+        from tools.tool_search import validate_deferred_call_args
+
+        name = "mcp_probe_dynamic_enum_validation"
+        toolset = "mcp-probe-dynamic-enum-validation"
+        calls = []
+
+        def _handler(args, task_id=None, **kw):
+            calls.append(args)
+            return json.dumps({"ok": True, "args": args})
+
+        registry.register(
+            name=name,
+            handler=_handler,
+            schema={
+                "name": name,
+                "description": "dynamic enum test",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "aspect_ratio": {
+                            "type": "string",
+                            "enum": ["landscape", "square", "portrait"],
+                        },
+                    },
+                    "required": ["aspect_ratio"],
+                },
+            },
+            toolset=toolset,
+            dynamic_schema_overrides=lambda: {
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "aspect_ratio": {
+                            "type": "string",
+                            "enum": ["1:4", "1:8", "9:16"],
+                        },
+                        "image_size": {
+                            "type": "string",
+                            "enum": ["1K", "2K", "4K"],
+                        },
+                    },
+                    "required": ["aspect_ratio"],
+                },
+            },
+        )
+
+        assert validate_deferred_call_args(
+            name, {"aspect_ratio": "1:4", "image_size": "4K"}
+        ) is None
+        rejected = json.loads(validate_deferred_call_args(
+            name, {"aspect_ratio": "landscape", "image_size": "4K"}
+        ))
+        assert rejected["path"] == "arguments.aspect_ratio"
+        assert rejected["parameters"]["properties"]["aspect_ratio"]["enum"] == [
+            "1:4", "1:8", "9:16"
+        ]
+
     def test_invalid_enum_is_blocked_before_dispatch(self):
         import model_tools
 
