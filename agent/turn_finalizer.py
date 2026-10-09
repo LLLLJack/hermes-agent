@@ -20,7 +20,7 @@ from agent.message_sanitization import _sanitize_surrogates
 # Verification-continuation nudges (verify-on-stop / pre_verify) must be stripped from
 # returned/live history to avoid role-alternation breaks; the assistant response is
 # real content and is not flagged. (#65919)
-_VERIFICATION_CONTINUATION_FLAGS = ("_verification_stop_synthetic", "_pre_verify_synthetic")
+_VERIFICATION_CONTINUATION_FLAGS = ("_verification_stop_synthetic", "_pre_verify_synthetic", "_fallback_artifact_synthetic")
 
 _SENTENCE_END = {".", "!", "?", "。", "！", "？", "`", ")"}
 
@@ -450,6 +450,12 @@ def finalize_turn(
         logger=logger,
     )
 
+    # A bounded post-fallback check that still yielded only progress is a
+    # terminal incomplete task, not a successful provider finish=stop.
+    if getattr(agent, "_fallback_artifact_unfinished", False):
+        failed = True
+        _turn_exit_reason = "fallback_artifact_incomplete"
+
     completed = (
         final_response is not None
         and not failed
@@ -577,6 +583,9 @@ def finalize_turn(
         )
         _cause = getattr(agent, "_last_persistence_error_cause", None)
         result["failure_reason"] = "session_persistence_failed:" + (_cause or "unknown")
+    if getattr(agent, "_fallback_artifact_unfinished", False):
+        result["error"] = "Requested file deliverable was not completed after provider fallback."
+        result["failure_reason"] = "fallback_artifact_incomplete"
     # Cleanup failures are surfaced, but the response is returned either way (#8049).
     if _cleanup_errors:
         result["cleanup_errors"] = _cleanup_errors

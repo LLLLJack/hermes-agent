@@ -3,7 +3,8 @@
 When the model stops with a text answer, three gates may instead append the answer as an
 interim row plus a synthetic user-role nudge and continue the turn: verify-on-stop (#65919),
 the ``pre_verify`` plugin hook after code edits, and the kanban worker terminal-tool guard.
-Each keeps the candidate answer as a budget-exhaustion fallback
+The last, fallback-specific gate only checks explicit artifact requests plus progress-only
+responses, and is bounded to one retry. Each keeps the candidate answer as a budget-exhaustion fallback
 (``pending_verification_response``) and clears ``final_response`` so the finalizer can tell
 this gate from error exits (#61631). Nothing here imports ``agent.conversation_loop`` at
 module level (cycle).
@@ -104,6 +105,7 @@ def _append_interim_answer(agent, final_msg, messages, conversation_history, flu
 def apply_stop_gates(
     agent: Any, final_msg: Dict[str, Any], *, final_response: Any, messages: List[Dict[str, Any]],
     conversation_history: Any, pending_verification_response: Any,
+    user_message: Any = None,
     pending_verification_response_previewed: Any,
 ) -> StopGateVerdict:
     """Run verify-on-stop → pre_verify hook → kanban stop guard, in that order. Nudges
@@ -167,6 +169,24 @@ def apply_stop_gates(
             "kanban_complete/kanban_block — nudging to finish"
         )
         return verdict
+    # A successful provider fallback can still abandon an in-progress file task:
+    # a brief "still working" reply is not an artifact delivery. Only this narrow
+    # post-fallback case gets one continuation, never a tool replay by the runtime.
+    from agent.fallback_artifact_completion import fallback_artifact_nudge
+    _artifact_nudge = fallback_artifact_nudge(agent, user_message, final_response)
+    if _artifact_nudge:
+        agent._fallback_artifact_completion_attempts = 1
+        final_msg["finish_reason"] = "fallback_artifact_continue"
+        _append_interim_answer(
+            agent, final_msg, messages, conversation_history,
+            "fallback-artifact interim flush failed",
+        )
+        logger.warning(
+            "Fallback artifact stop gate: progress-only reply; continuing once (model=%s provider=%s)",
+            getattr(agent, "model", ""), getattr(agent, "provider", ""),
+        )
+        return _continue(_artifact_nudge, "_fallback_artifact_synthetic")
+
     return StopGateVerdict(
         continue_turn=False, final_response=final_response,
         pending_verification_response=pending_verification_response,
