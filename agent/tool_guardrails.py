@@ -307,6 +307,7 @@ class ToolCallGuardrailController:
         self._same_tool_failure_counts: dict[str, int] = {}
         # signature -> a mutating call succeeded since its last failure
         self._progress_since_failure: dict[ToolCallSignature, bool] = {}
+        self._stalled_paths: dict[tuple, int] = {}
         self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
         self._halt_decision: ToolGuardrailDecision | None = None
         # Identical-call streak: CONSECUTIVE identical (tool, args, result) calls; any different call or
@@ -369,6 +370,24 @@ class ToolCallGuardrailController:
     ) -> ToolGuardrailDecision:
         args = _coerce_args(args)
         signature = ToolCallSignature.from_call(tool_name, args)
+        if tool_name == "read_file":
+            payload = safe_json_loads(result or "")
+            if isinstance(payload, dict) and isinstance(payload.get("content"), str) and not payload.get("error"):
+                path = payload.get("path") or args.get("path")
+                for key in [key for key in self._stalled_paths if key[0] == path]:
+                    del self._stalled_paths[key]
+            if isinstance(payload, dict) and payload.get("status") == "stalled_path":
+                path, version = payload.get("path"), payload.get("version")
+                if isinstance(path, str) and isinstance(version, list):
+                    key = (path, canonical_tool_args({"version": version}))
+                    if key not in self._stalled_paths and len(self._stalled_paths) >= 128:
+                        self._stalled_paths.pop(next(iter(self._stalled_paths)))
+                    count = min(self._stalled_paths.get(key, 0) + 1, 3)
+                    self._stalled_paths[key] = count
+                    return self._decide(
+                        "halt" if count >= 3 else "warn", "stalled_path", tool_name, count,
+                        ToolCallSignature.from_call(tool_name, {"path": path}),
+                        message="This unchanged short path is stalled. Stop reading it and replan from the content already returned.")
         if failed is None:
             failed, _ = classify_tool_failure(tool_name, result)
         warnings = self.config.warnings_enabled

@@ -6,16 +6,19 @@ stores: ``last_key``/``consecutive`` (loop detection; reset by any OTHER tool
 call), ``read_history`` (diagnostics), ``dedup`` (key -> mtime; survives context
 compression), ``dedup_generation_reads`` (keys whose full content was served since
 the last compaction boundary; cleared on compression so one recovery read returns
-full content), ``dedup_hits`` (stub-loop breaker), ``read_timestamps``
+full content), ``path_progress`` (short-file coverage/version/futile reads),
+``dedup_hits`` (stub-loop breaker), ``read_timestamps``
 (staleness warnings) and ``not_found`` (short-TTL negative cache). Every
 container is hard-capped (``_cap_read_tracker_data``) so long sessions stay small.
 """
 
+import json
 import logging
 import os
 import threading
 import time
 
+from hermes_constants import get_hermes_home
 from tools.file_state import _evict_oldest
 from tools.file_tools_paths import _authoritative_workspace_root, _resolve_path_for_task
 
@@ -35,6 +38,10 @@ _PATCH_FAILURE_PATHS_CAP = 64
 _READ_HISTORY_CAP = 500
 _DEDUP_CAP = 1000
 _READ_TIMESTAMPS_CAP = 1000
+_PATH_PROGRESS_CAP = 128
+_SHORT_FILE_LINES = 200
+_SHORT_FILE_BYTES = 32_768
+_PATH_STALL_AFTER = 6
 _NOT_FOUND_CAP = 500
 _NOT_FOUND_TTL_SECONDS = 60.0  # a path that didn't exist may be created soon
 
@@ -44,7 +51,7 @@ def _task_data(task_id: str) -> dict:
     (search_tool / tests create partial entries). Lock must be held."""
     task_data = _read_tracker.setdefault(task_id, {
         "last_key": None, "consecutive": 0, "read_history": set()})
-    for key in ("dedup", "dedup_hits", "read_timestamps"):
+    for key in ("dedup", "dedup_hits", "read_timestamps", "path_progress"):
         task_data.setdefault(key, {})
     task_data.setdefault("dedup_generation_reads", set())
     return task_data
@@ -75,6 +82,7 @@ def _cap_read_tracker_data(task_data: dict) -> None:
     """Enforce size caps on the per-task sub-containers. Call with ``_read_tracker_lock`` held."""
     # Caps are read at call time so tests can monkeypatch the module constants.
     for key, cap in (
+        ("path_progress", _PATH_PROGRESS_CAP),
         ("read_history", _READ_HISTORY_CAP),
         ("dedup", _DEDUP_CAP),
         ("dedup_hits", _DEDUP_CAP),
@@ -160,6 +168,8 @@ def reset_file_dedup(task_id: str = None):
             if "dedup_hits" in task_data:
                 task_data["dedup_hits"].clear()
             task_data.setdefault("dedup_generation_reads", set()).clear()
+            for entry in task_data.get("path_progress", {}).values():
+                entry["recovery"] = True
 
 
 def notify_other_tool_call(task_id: str = "default"):
@@ -189,6 +199,7 @@ def _invalidate_dedup_for_path(filepath: str, task_id: str) -> None:
         task_data = _read_tracker.get(task_id)
         if task_data is None:
             return
+        task_data.get("path_progress", {}).pop((str(get_hermes_home()), resolved), None)
         dedup = task_data.get("dedup")
         if dedup:
             for k in [k for k in dedup if k[0] == resolved]:
@@ -261,3 +272,76 @@ def _mark_verification_stale(task_id: str, resolved_paths: list[str],
         mark_workspace_edited(session_id=session_id or task_id, cwd=cwd, paths=paths)
     except Exception:
         logger.debug("verification stale marker failed", exc_info=True)
+
+
+def _read_path_version(resolved: str) -> tuple | None:
+    try:
+        st = os.stat(resolved)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _check_path_progress(task_data: dict, resolved: str, version: tuple | None,
+                         offset: int, limit: int) -> tuple[str | None, bool, int]:
+    """Count only reads that cannot uncover lines on a known short file.
+
+    The profile/path key survives unrelated calls; a changed version or a newly
+    covered line is progress. Compaction grants one content recovery per path.
+    """
+    key = (str(get_hermes_home()), resolved)
+    with _read_tracker_lock:
+        entries = task_data["path_progress"]
+        entry = entries.get(key)
+        if entry is None:
+            return None, False, 0
+        if version is None or entry["version"] != version:
+            entries.pop(key, None)
+            # The region cache uses mtime alone; ctime/size/inode changes also
+            # require fresh bytes even if an external editor preserved mtime.
+            for region in [region for region in task_data["dedup"] if region[0] == resolved]:
+                task_data["dedup"].pop(region, None)
+                task_data["dedup_hits"].pop(region, None)
+                task_data["dedup_generation_reads"].discard(region)
+            return None, True, 0
+        if entry["recovery"]:
+            entry["recovery"] = False
+            entry["futile"] = 0
+            return None, True, 0
+        requested = set(range(offset, min(offset + limit, entry["total"] + 1)))
+        if requested - entry["seen"]:
+            entry["futile"] = 0
+            return None, False, 0
+        entry["futile"] = min(entry["futile"] + 1, _PATH_STALL_AFTER)
+        count = entry["futile"]
+        if count < _PATH_STALL_AFTER:
+            return None, False, count
+        return json.dumps({
+            "status": "stalled_path", "path": resolved,
+            "version": list(version), "content_returned": False,
+            "error": "BLOCKED: Repeated reads of this short unchanged file uncover no new lines. "
+                     "Stop reading this path; use the earlier content, edit it, or replan the task.",
+        }), False, count
+
+
+def _record_path_progress(task_data: dict, resolved: str, version: tuple | None,
+                          offset: int, result: dict) -> None:
+    total = result.get("total_lines")
+    if (version is None or result.get("error") or not isinstance(total, int)
+            or not 0 <= total <= _SHORT_FILE_LINES or version[2] > _SHORT_FILE_BYTES
+            or result.get("truncated_by")):
+        return
+    # Count only the lines actually returned, including a page limited by bytes.
+    lines = len((result.get("content") or "").splitlines())
+    seen = set(range(offset, min(offset + lines, total + 1)))
+    key = (str(get_hermes_home()), resolved)
+    with _read_tracker_lock:
+        entry = task_data["path_progress"].get(key)
+        if entry is None or entry["version"] != version:
+            entry = {"version": version, "total": total, "seen": set(),
+                     "futile": 0, "recovery": False}
+            task_data["path_progress"][key] = entry
+        if seen - entry["seen"]:
+            entry["futile"] = 0
+        entry["seen"].update(seen)
+        _cap_read_tracker_data(task_data)

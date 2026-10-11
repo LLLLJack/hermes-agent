@@ -3268,13 +3268,20 @@ def _should_skip_same_provider_retry(task: Optional[str], exc: Exception) -> boo
 
 
 def _evict_cached_clients(provider: str) -> None:
-    """Drop cached auxiliary clients for a provider so fresh creds are used."""
+    """Drop this profile's cached auxiliary clients for a provider so fresh creds are used.
+
+    Scoped to the calling profile (``hermes_home_key()`` is the first key slot): a rotation in
+    one profile must not drop another profile's client for the same provider in a multiplexing
+    gateway, since that profile's credentials did not change. Entries are popped, not closed:
+    a concurrent caller may be mid-request on the shared client (closing it raises ReadError /
+    "client has been closed" for them); the dropped client is retired by GC like the FIFO
+    overflow path in ``_get_cached_client``.
+    """
     normalized = _normalize_aux_provider(provider)
+    home = hermes_home_key()
     with _client_cache_lock:
-        for key in [key for key in _client_cache if _normalize_aux_provider(str(key[0])) == normalized]:
-            client = _client_cache.get(key, (None, None, None))[0]
-            if client is not None:
-                _close_cached_client(client)
+        for key in [key for key in _client_cache
+                    if key[0] == home and _normalize_aux_provider(str(key[1])) == normalized]:
             _client_cache.pop(key, None)
 
 
@@ -7053,7 +7060,7 @@ def _ladder_credential_rungs(
 
 def _next_fallback_after_quarantine(
     task: Optional[str], resolved_provider: str, is_auto: bool, route: _LadderRoute,
-    failed_model: Optional[str], failure_scope: Any,
+    failed_model: Optional[str], failure_scope: Any, *, task_chain_only: bool = False,
 ) -> Tuple[Optional[Any], Optional[str], str]:
     """Next candidate after a fallback entry was quarantined mid-request: remaining configured
     entries (task chain, then main chain on auto) before the discovery chain."""
@@ -7061,6 +7068,8 @@ def _next_fallback_after_quarantine(
     fb = _try_configured_fallback_chain(
         task, resolved_provider or "auto", reason=reason, failed_model=failed_model,
         failed_base_url=route.base_info, failure_scope=failure_scope)
+    if task_chain_only:
+        return fb
     if fb[0] is None and is_auto:
         fb = _try_main_fallback_chain(
             task, resolved_provider or "auto", reason=reason, failed_model=failed_model,
@@ -7077,7 +7086,8 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
     chain, explicit: main-agent-model net). Returns the response or None.
     Capacity errors (payment/quota, connection, exhausted 429, model incompatible, malformed
     response) bypass the explicit-provider gate — the provider cannot serve this request
-    regardless of user intent. Auth errors only fall back in auto mode."""
+    regardless of user intent. Auth errors from an explicit provider may only use the task's
+    own configured fallback_chain; they never imply an unconfigured provider hop."""
     task, tag, resolved_provider = route.task, route.tag, route.resolved_provider
     # Respect explicit provider choice for transient errors (auth, request validation, etc.) but allow
     # fallback when the provider clearly cannot serve the request due to capacity: payment/quota exhaustion
@@ -7089,7 +7099,12 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
     reason = next((label for predicate, label in _FALLBACK_REASONS if predicate(first_err)), None)
     is_capacity_error = any(
         predicate(first_err) for predicate, label in _FALLBACK_REASONS if label != "auth error")
-    if reason is None or not (is_auto or is_capacity_error):
+    task_chain = _get_auxiliary_task_config(task).get("fallback_chain") if task else None
+    has_task_fallback_chain = isinstance(task_chain, list) and bool(task_chain)
+    explicit_auth_with_task_chain = (
+        reason == "auth error" and not is_auto and has_task_fallback_chain
+    )
+    if reason is None or not (is_auto or is_capacity_error or explicit_auth_with_task_chain):
         return None
     if reason == "payment error":
         # Mark the concrete backend (not the "auto" label) unhealthy so later aux calls skip
@@ -7120,7 +7135,7 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
             fb_client, fb_model, fb_label = _try_payment_fallback(
                 resolved_provider, task, reason=reason, failed_base_url=route.base_info,
                 failure_scope=_chain_failure_scope, main_runtime=route.main_runtime)
-    elif fb_client is None:
+    elif fb_client is None and not explicit_auth_with_task_chain:
         fb_client, fb_model, fb_label = _try_main_agent_model_fallback(
             resolved_provider, task, reason=reason, failed_model=_chain_failed_model,
             failed_base_url=route.base_info, failure_scope=_chain_failure_scope)
@@ -7135,7 +7150,8 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
                 return fb_resp
             if _pass == 0:
                 fb_client, fb_model, fb_label = _next_fallback_after_quarantine(
-                    task, resolved_provider, is_auto, route, _chain_failed_model, _chain_failure_scope)
+                    task, resolved_provider, is_auto, route, _chain_failed_model, _chain_failure_scope,
+                    task_chain_only=explicit_auth_with_task_chain)
                 if fb_client is None:
                     break
     # All fallback layers exhausted — one user-visible warning, then re-raise.

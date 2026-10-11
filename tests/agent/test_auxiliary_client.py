@@ -2748,16 +2748,21 @@ class TestAuxiliaryAuthRefreshRetry:
 
 
 
-    def test_refresh_provider_credentials_force_refreshes_anthropic_oauth_and_evicts_cache(self, monkeypatch):
+    def test_refresh_provider_credentials_force_refreshes_anthropic_oauth_and_evicts_cache(self, monkeypatch, tmp_path):
         stale_client = MagicMock()
-        cache_key = ("anthropic", False, None, None, None)
+        from agent.auxiliary_client import _client_cache_key
+        cache_key = _client_cache_key("anthropic", async_mode=False)
 
         monkeypatch.setenv("ANTHROPIC_TOKEN", "")
         monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "")
         monkeypatch.setenv("ANTHROPIC_API_KEY", "")
 
         with (
-            patch("agent.auxiliary_client._client_cache", {cache_key: (stale_client, "claude-haiku-4-5-20251001", None)}),
+            patch("agent.auxiliary_client._client_cache", {cache_key: (stale_client, "claude-haiku-4-5-20251001", None)}) as cache,
+            patch("agent.auxiliary_client.load_pool", return_value=SimpleNamespace(
+                entry_id_for_api_key=lambda token: None)),
+            patch("agent.anthropic_credentials.claude_code_credentials_path",
+                  return_value=tmp_path / "claude-credentials.json"),
             # Anthropic credential sourcing lives in agent/anthropic_credentials.py;
             # patch it at that definition site so both the direct call here and
             # the re-read inside ``_refresh_oauth_token`` see the same stub.
@@ -2779,7 +2784,8 @@ class TestAuxiliaryAuthRefreshRetry:
 
         mock_refresh_oauth.assert_called_once_with("refresh-token", use_json=False)
         mock_write.assert_called_once_with("fresh-token", "refresh-token-2", 9999999999999)
-        stale_client.close.assert_called_once()
+        assert cache_key not in cache
+        stale_client.close.assert_not_called()
 
     def test_refresh_provider_credentials_remints_vertex_token_and_evicts_cache(self):
         """Vertex tokens live ~1h; on a long-running gateway the cached
@@ -2791,10 +2797,11 @@ class TestAuxiliaryAuthRefreshRetry:
         through to the final `return False` and the stale client (and its
         dead token) stayed cached until process restart."""
         stale_client = MagicMock()
-        cache_key = ("vertex", False, None, None, None)
+        from agent.auxiliary_client import _client_cache_key
+        cache_key = _client_cache_key("vertex", async_mode=False)
 
         with (
-            patch("agent.auxiliary_client._client_cache", {cache_key: (stale_client, "google/gemini-3-flash-preview", None)}),
+            patch("agent.auxiliary_client._client_cache", {cache_key: (stale_client, "google/gemini-3-flash-preview", None)}) as cache,
             patch(
                 "agent.vertex_adapter.get_vertex_config",
                 return_value=("ya29.FRESH", "https://aiplatform.googleapis.com/v1beta1/projects/p/locations/global/endpoints/openapi"),
@@ -2805,7 +2812,8 @@ class TestAuxiliaryAuthRefreshRetry:
             assert _refresh_provider_credentials("vertex") is True
 
         mock_get_config.assert_called_once_with(force_refresh=True)
-        stale_client.close.assert_called_once()
+        assert cache_key not in cache
+        stale_client.close.assert_not_called()
 
     def test_refresh_provider_credentials_vertex_returns_false_when_unminted(self):
         """No usable token/base_url (e.g. ADC and the service-account file

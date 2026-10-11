@@ -35,7 +35,8 @@ from tools.file_tools_read_tracking import (
     _bump_consecutive, _cap_read_tracker_data, _check_file_staleness, _check_not_found_cache,
     _mark_verification_stale, _patch_failure_lock, _patch_failure_tracker, _read_tracker,
     _read_tracker_lock, _record_not_found, _record_patch_failure, _reset_patch_failures,
-    _task_data, _update_read_timestamp)
+    _task_data, _update_read_timestamp, _check_path_progress, _read_path_version,
+    _record_path_progress)
 
 logger = logging.getLogger(__name__)
 
@@ -595,10 +596,22 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
             # First unchanged read after a compaction boundary serves full content
             # (the summary may have dropped exact bytes); later ones get the stub.
             content_served_in_generation = dedup_key in task_data["dedup_generation_reads"]
-        if cached_mtime is not None:
+        # Never stat a container path on the host to infer its version.
+        version = (_read_path_version(resolved_str)
+                   if _file_ops_uses_host_paths(_get_file_ops(task_id)) else None)
+        stalled, recovery, futile = _check_path_progress(
+            task_data, resolved_str, version, offset, limit)
+        if stalled is not None:
+            return stalled
+        if cached_mtime is not None and not recovery:
             try:
                 if os.path.getmtime(resolved_str) == cached_mtime and content_served_in_generation:
-                    return _dedup_stub_or_block(task_data, dedup_key, path)
+                    stub = _dedup_stub_or_block(task_data, dedup_key, path)
+                    if futile >= 3:
+                        payload = json.loads(stub)
+                        payload["_warning"] = "Repeated reads of this unchanged path uncover no new lines; use earlier content or replan."
+                        return json.dumps(payload, ensure_ascii=False)
+                    return stub
             except OSError:
                 pass  # stat failed — fall through to full read
 
@@ -631,16 +644,21 @@ def read_file_tool(path: str, offset: int = 1, limit: int = DEFAULT_READ_LIMIT, 
                 "Consider reading only the section you need with offset and limit "
                 "to keep context usage efficient."))
 
+        # Only bind coverage to a version that stayed stable across the read.
+        if version is not None and version == _read_path_version(resolved_str):
+            _record_path_progress(task_data, resolved_str, version, offset, result_dict)
+        if futile >= 3:
+            result_dict["_warning"] = "Repeated reads of this unchanged path uncover no new lines; use earlier content or replan."
         count = _record_successful_read(task_data, task_id, path, resolved_str, offset, limit,
                                         dedup_key, partial=(offset > 1) or bool(result_dict.get("truncated")))
-        if count >= 4:
+        if count >= 4 and not recovery:
             return tool_error(
                 f"BLOCKED: You have read this exact file region {count} times in a row. "
                 "The content has NOT changed. You already have this information. "
                 "STOP re-reading and proceed with your task.",
                 path=path,
                 already_read=count)
-        if count >= 3:
+        if count >= 3 and not recovery:
             result_dict["_warning"] = (
                 f"You have read this exact file region {count} times consecutively. "
                 "The content has not changed since your last read. Use the information you already have. "
