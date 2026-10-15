@@ -44,6 +44,8 @@ grow: expansive at the edges, conservative at the waist.
 
 ### VPS stable production maintenance (local fork rule)
 
+The upstream file/function/branch structural thresholds are **review heuristics for planned development**, not a forced prerequisite for a narrowly scoped VPS production hotfix. An urgent one-path patch may be delivered with focused regression, a reproducible overlay and rollback metadata without an unrelated refactor; planned feature work still follows the structural quality standards.
+
 The upstream rules below describe contribution work against current `main`. For maintenance of this VPS's pinned production baseline, use a narrower path:
 
 - Reproduce from the actually deployed image/revision and its overlay first; do not assume current upstream `main` is the running code.
